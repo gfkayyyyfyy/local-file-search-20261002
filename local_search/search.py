@@ -69,19 +69,25 @@ def _collect_files(root: str) -> list[str]:
 
 
 def _search_file(path: str, keyword: str) -> dict | None:
-    """在单个文件中查找首个单行命中，返回结果项；无命中返回 None。"""
+    """在单个文件中查找首个单行命中，返回结果项；无命中返回 None。
+
+    先完整读取并按 UTF-8 解码整个文件：非法字节无论出现在命中之前、之后
+    还是文件末尾（包括末尾截断的多字节字符），都会抛出 UnicodeDecodeError，
+    由调用方跳过该文件并告警，不会返回该文件的任何命中。
+    """
     with open(path, "r", encoding="utf-8") as handle:
-        for line_number, raw_line in enumerate(handle, start=1):
-            line = raw_line.rstrip("\r\n")
-            position = line.find(keyword)
-            if position == -1:
-                continue
-            start = max(0, position - CONTEXT_CHARS)
-            end = min(len(line), position + len(keyword) + CONTEXT_CHARS)
-            return {
-                "line": line_number,
-                "snippet": line[start:end],
-            }
+        content = handle.read()
+    for line_number, raw_line in enumerate(content.split("\n"), start=1):
+        line = raw_line.rstrip("\r\n")
+        position = line.find(keyword)
+        if position == -1:
+            continue
+        start = max(0, position - CONTEXT_CHARS)
+        end = min(len(line), position + len(keyword) + CONTEXT_CHARS)
+        return {
+            "line": line_number,
+            "snippet": line[start:end],
+        }
     return None
 
 

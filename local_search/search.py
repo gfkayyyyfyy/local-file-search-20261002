@@ -1,7 +1,7 @@
 """目录文本检索的最小实现。
 
 用法：
-    python -m local_search <目录> <关键词>
+    python -m local_search <目录> <关键词> [--path-contains <路径片段>]
 
 仅依赖 Python 3 标准库，离线运行，只读扫描源文件，不生成索引。
 """
@@ -91,16 +91,49 @@ def _search_file(path: str, keyword: str) -> dict | None:
     return None
 
 
+def _parse_args(args: list[str]) -> tuple[str, str, str | None] | None:
+    """解析命令行参数。
+
+    形式固定为：<目录> <关键词> [--path-contains <路径片段>]。
+    两个位置参数按位置原样取用，因此以连字符开头的关键词仍按字面文本处理；
+    --path-contains 至多出现一次且必须带值，任何其他形式均返回 None 表示参数错误。
+    路径片段不做裁剪，空格原样保留。
+    """
+    if len(args) < 2:
+        return None
+
+    target_dir, keyword = args[0], args[1]
+    path_fragment: str | None = None
+
+    index = 2
+    if index < len(args):
+        if args[index] != "--path-contains":
+            return None
+        index += 1
+        if index >= len(args):
+            return None
+        path_fragment = args[index]
+        index += 1
+        if index != len(args):
+            return None
+
+    return target_dir, keyword, path_fragment
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
-    if len(args) != 2:
-        return _fail("用法: python -m local_search <目录> <关键词>")
-
-    target_dir, keyword = args
+    parsed = _parse_args(args)
+    if parsed is None:
+        return _fail(
+            "用法: python -m local_search <目录> <关键词> [--path-contains <路径片段>]"
+        )
+    target_dir, keyword, path_fragment = parsed
 
     if not keyword or not keyword.strip():
         return _fail("错误: 关键词为空或全为空白")
+    if path_fragment is not None and not path_fragment.strip():
+        return _fail("错误: 路径片段为空或全为空白")
     if not os.path.exists(target_dir):
         return _fail(f"错误: 目录不存在: {target_dir}")
     if not os.path.isdir(target_dir):
@@ -114,6 +147,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     results = []
     for path in file_paths:
         rel = _relative_path(path, target_dir)
+        # 先按相对路径字面筛选：被排除的文件根本不打开，
+        # 因此即使无法读取或含非法 UTF-8 字节也不会产生告警。
+        if path_fragment is not None and path_fragment not in rel:
+            continue
         try:
             hit = _search_file(path, keyword)
         except UnicodeDecodeError as exc:

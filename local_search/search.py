@@ -1,7 +1,7 @@
 """目录文本检索的最小实现。
 
 用法：
-    python -m local_search <目录> <关键词> [--path-contains <路径片段>]
+    python -m local_search <目录> <关键词> [--path-contains <路径片段>] [--ignore-case]
 
 仅依赖 Python 3 标准库，离线运行，只读扫描源文件，不生成索引。
 """
@@ -14,7 +14,17 @@ from collections.abc import Sequence
 SUPPORTED_SUFFIXES = (".txt", ".md")
 CONTEXT_CHARS = 30
 PATH_OPTION = "--path-contains"
-USAGE = "用法: python -m local_search <目录> <关键词> [--path-contains <路径片段>]"
+IGNORE_CASE_OPTION = "--ignore-case"
+USAGE = (
+    "用法: python -m local_search <目录> <关键词> "
+    "[--path-contains <路径片段>] [--ignore-case]"
+)
+
+# 仅折叠 ASCII 的 A-Z 到 a-z；translate 按码点一一映射，不产生多字符展开
+# （因此 ß 不会变成 ss），也不影响 É 等非 ASCII 字符。
+_ASCII_UPPER_TO_LOWER = str.maketrans(
+    {code: code + 32 for code in range(ord("A"), ord("Z") + 1)}
+)
 
 
 class TraversalError(Exception):
@@ -43,6 +53,11 @@ def _relative_path(path: str, root: str) -> str:
     if os.sep != "/":
         rel = rel.replace(os.sep, "/")
     return rel
+
+
+def _ascii_lower(text: str) -> str:
+    """仅将 ASCII A-Z 转为小写，其他码点（含 É、é、ß 等）原样保留。"""
+    return text.translate(_ASCII_UPPER_TO_LOWER)
 
 
 def _collect_files(root: str) -> list[str]:
@@ -74,18 +89,26 @@ def _collect_files(root: str) -> list[str]:
     return collected
 
 
-def _search_file(path: str, keyword: str) -> dict | None:
+def _search_file(path: str, keyword: str, ignore_case: bool = False) -> dict | None:
     """在单个文件中查找首个单行命中，返回结果项；无命中返回 None。
 
     先完整读取并按 UTF-8 解码整个文件：非法字节无论出现在命中之前、之后
     还是文件末尾（包括末尾截断的多字节字符），都会抛出 UnicodeDecodeError，
     由调用方跳过该文件并告警，不会返回该文件的任何命中。
+
+    ignore_case 为真时，仅把 ASCII 的 A-Z/a-z 视为同一字符；其他字符仍精确
+    比较（É 不匹配 é、ß 不匹配 ss）。匹配只用于定位，返回的片段始终取自
+    源文本，保留原始大小写。
     """
     with open(path, "r", encoding="utf-8") as handle:
         content = handle.read()
+    folded_keyword = _ascii_lower(keyword) if ignore_case else keyword
     for line_number, raw_line in enumerate(content.split("\n"), start=1):
         line = raw_line.rstrip("\r\n")
-        position = line.find(keyword)
+        if ignore_case:
+            position = _ascii_lower(line).find(folded_keyword)
+        else:
+            position = line.find(keyword)
         if position == -1:
             continue
         start = max(0, position - CONTEXT_CHARS)
@@ -97,11 +120,17 @@ def _search_file(path: str, keyword: str) -> dict | None:
     return None
 
 
-def _parse_args(args: list[str]) -> tuple[str, str, str | None]:
-    """解析参数：恰好两个位置参数，其后可出现一次 --path-contains <片段>。
+def _parse_args(args: list[str]) -> tuple[str, str, str | None, bool]:
+    """解析参数：恰好两个位置参数，其后可出现选项。
 
-    不使用通用选项解析：两个位置参数按字面取值，因此以连字符开头的
-    关键词仍是字面文本。选项只允许出现在两个位置参数之后。
+    支持的选项：
+    - ``--path-contains <片段>``：路径片段取紧随选项的一个参数，该值即使
+      看起来像选项（包括 ``--ignore-case``）也仍是字面值；
+    - ``--ignore-case``：无取值的开关，可重复指定即报错。
+
+    两组选项只允许出现在两个位置参数之后，相互先后顺序不限。不使用通用
+    选项解析：两个位置参数按字面取值，因此以连字符开头的关键词（即使恰好
+    为 ``--ignore-case``）仍是字面文本。
     """
     if len(args) < 2:
         raise ArgumentError(USAGE)
@@ -110,6 +139,7 @@ def _parse_args(args: list[str]) -> tuple[str, str, str | None]:
     rest = args[2:]
 
     path_contains: str | None = None
+    ignore_case = False
     index = 0
     while index < len(rest):
         token = rest[index]
@@ -118,19 +148,25 @@ def _parse_args(args: list[str]) -> tuple[str, str, str | None]:
                 raise ArgumentError(f"错误: 选项 {PATH_OPTION} 只能指定一次")
             if index + 1 >= len(rest):
                 raise ArgumentError(f"错误: 选项 {PATH_OPTION} 缺少值")
+            # 取值始终按字面消费，不把它解释成任何开关。
             path_contains = rest[index + 1]
             index += 2
+        elif token == IGNORE_CASE_OPTION:
+            if ignore_case:
+                raise ArgumentError(f"错误: 选项 {IGNORE_CASE_OPTION} 只能指定一次")
+            ignore_case = True
+            index += 1
         else:
             raise ArgumentError(f"错误: 无法识别的参数: {token}")
 
-    return target_dir, keyword, path_contains
+    return target_dir, keyword, path_contains, ignore_case
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
     try:
-        target_dir, keyword, path_contains = _parse_args(args)
+        target_dir, keyword, path_contains, ignore_case = _parse_args(args)
     except ArgumentError as exc:
         return _fail(str(exc))
 
@@ -153,10 +189,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         rel = _relative_path(path, target_dir)
         # 先按路径决定文件是否参与内容检索：被排除的文件既不读取也不校验，
         # 因此即使无法读取或含非法 UTF-8 字节也不会产生该文件的告警。
+        # 路径筛选始终区分大小写，不受 --ignore-case 影响。
         if path_contains is not None and path_contains not in rel:
             continue
         try:
-            hit = _search_file(path, keyword)
+            hit = _search_file(path, keyword, ignore_case)
         except UnicodeDecodeError as exc:
             _emit_stderr(f"警告: 跳过文件 {rel}: 无法按 UTF-8 解码 ({exc})")
             continue

@@ -1,7 +1,7 @@
 """目录文本检索的最小实现。
 
 用法：
-    python -m local_search <目录> <关键词> [--path-contains <路径片段>]
+    python -m local_search <目录> <关键词> [--ignore-case] [--path-contains <路径片段>]
 
 仅依赖 Python 3 标准库，离线运行，只读扫描源文件，不生成索引。
 """
@@ -14,7 +14,19 @@ from collections.abc import Sequence
 SUPPORTED_SUFFIXES = (".txt", ".md")
 CONTEXT_CHARS = 30
 PATH_OPTION = "--path-contains"
-USAGE = "用法: python -m local_search <目录> <关键词> [--path-contains <路径片段>]"
+IGNORE_CASE_OPTION = "--ignore-case"
+USAGE = "用法: python -m local_search <目录> <关键词> [--ignore-case] [--path-contains <路径片段>]"
+
+# 仅折叠 ASCII 的 A-Z / a-z：其余字符（如 É/é、ß）仍按码点精确比较。
+_ASCII_FOLD_TABLE = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+    "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
+)
+
+
+def _fold_ascii(text: str) -> str:
+    """把 ASCII 大写字母折成小写，其他字符原样保留（逐码点一一对应）。"""
+    return text.translate(_ASCII_FOLD_TABLE)
 
 
 class TraversalError(Exception):
@@ -74,18 +86,24 @@ def _collect_files(root: str) -> list[str]:
     return collected
 
 
-def _search_file(path: str, keyword: str) -> dict | None:
+def _search_file(path: str, keyword: str, ignore_case: bool) -> dict | None:
     """在单个文件中查找首个单行命中，返回结果项；无命中返回 None。
 
     先完整读取并按 UTF-8 解码整个文件：非法字节无论出现在命中之前、之后
     还是文件末尾（包括末尾截断的多字节字符），都会抛出 UnicodeDecodeError，
     由调用方跳过该文件并告警，不会返回该文件的任何命中。
+
+    ignore_case 为真时仅把 ASCII 的 A-Z 与 a-z 视为同一字符；折叠是逐码点
+    一一对应，因此折叠后串中的命中位置与原串一致，snippet 仍取源文本的
+    原始大小写。首个命中仍按行号、行内位置确定，与大小写形态无关。
     """
     with open(path, "r", encoding="utf-8") as handle:
         content = handle.read()
+    needle = _fold_ascii(keyword) if ignore_case else keyword
     for line_number, raw_line in enumerate(content.split("\n"), start=1):
         line = raw_line.rstrip("\r\n")
-        position = line.find(keyword)
+        haystack = _fold_ascii(line) if ignore_case else line
+        position = haystack.find(needle)
         if position == -1:
             continue
         start = max(0, position - CONTEXT_CHARS)
@@ -97,11 +115,14 @@ def _search_file(path: str, keyword: str) -> dict | None:
     return None
 
 
-def _parse_args(args: list[str]) -> tuple[str, str, str | None]:
-    """解析参数：恰好两个位置参数，其后可出现一次 --path-contains <片段>。
+def _parse_args(args: list[str]) -> tuple[str, str, str | None, bool]:
+    """解析参数：恰好两个位置参数，其后可出现 --ignore-case 与一次
+    --path-contains <片段>，两者先后顺序不限。
 
     不使用通用选项解析：两个位置参数按字面取值，因此以连字符开头的
-    关键词仍是字面文本。选项只允许出现在两个位置参数之后。
+    关键词（即使恰好是 --ignore-case）仍是字面文本。选项只允许出现在
+    两个位置参数之后；--path-contains 的值取紧随其后的一个参数，即使
+    该值是 --ignore-case 也按字面作为路径片段。
     """
     if len(args) < 2:
         raise ArgumentError(USAGE)
@@ -110,6 +131,7 @@ def _parse_args(args: list[str]) -> tuple[str, str, str | None]:
     rest = args[2:]
 
     path_contains: str | None = None
+    ignore_case = False
     index = 0
     while index < len(rest):
         token = rest[index]
@@ -120,17 +142,22 @@ def _parse_args(args: list[str]) -> tuple[str, str, str | None]:
                 raise ArgumentError(f"错误: 选项 {PATH_OPTION} 缺少值")
             path_contains = rest[index + 1]
             index += 2
+        elif token == IGNORE_CASE_OPTION:
+            if ignore_case:
+                raise ArgumentError(f"错误: 选项 {IGNORE_CASE_OPTION} 只能指定一次")
+            ignore_case = True
+            index += 1
         else:
             raise ArgumentError(f"错误: 无法识别的参数: {token}")
 
-    return target_dir, keyword, path_contains
+    return target_dir, keyword, path_contains, ignore_case
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
     try:
-        target_dir, keyword, path_contains = _parse_args(args)
+        target_dir, keyword, path_contains, ignore_case = _parse_args(args)
     except ArgumentError as exc:
         return _fail(str(exc))
 
@@ -156,7 +183,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if path_contains is not None and path_contains not in rel:
             continue
         try:
-            hit = _search_file(path, keyword)
+            hit = _search_file(path, keyword, ignore_case)
         except UnicodeDecodeError as exc:
             _emit_stderr(f"警告: 跳过文件 {rel}: 无法按 UTF-8 解码 ({exc})")
             continue

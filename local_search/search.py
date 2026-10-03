@@ -2,6 +2,7 @@
 
 用法：
     python -m local_search <目录> <关键词> [--path-contains <路径片段>]
+                           [--path-excludes <路径片段>]
                            [--ignore-case] [--all-lines]
                            [--context-chars <0-200>]
 
@@ -17,12 +18,14 @@ SUPPORTED_SUFFIXES = (".txt", ".md")
 DEFAULT_CONTEXT_CHARS = 30
 MAX_CONTEXT_CHARS = 200
 PATH_OPTION = "--path-contains"
+PATH_EXCLUDES_OPTION = "--path-excludes"
 IGNORE_CASE_OPTION = "--ignore-case"
 ALL_LINES_OPTION = "--all-lines"
 CONTEXT_CHARS_OPTION = "--context-chars"
 USAGE = (
     "用法: python -m local_search <目录> <关键词> "
-    "[--path-contains <路径片段>] [--ignore-case] [--all-lines] "
+    "[--path-contains <路径片段>] [--path-excludes <路径片段>] "
+    "[--ignore-case] [--all-lines] "
     "[--context-chars <0-200>]"
 )
 
@@ -174,13 +177,17 @@ def _search_file(
     return hits
 
 
-def _parse_args(args: list[str]) -> tuple[str, str, str | None, bool, bool, int]:
+def _parse_args(
+    args: list[str],
+) -> tuple[str, str, str | None, str | None, bool, bool, int]:
     """解析参数：恰好两个位置参数，其后可出现选项。
 
     支持的选项：
-    - ``--path-contains <片段>``：路径片段取紧随选项的一个参数，该值即使
-      看起来像选项（包括 ``--ignore-case``、``--all-lines``、
-      ``--context-chars``）也仍是字面值；
+    - ``--path-contains <片段>``：路径包含片段，取紧随选项的一个参数，该值
+      即使看起来像选项（包括 ``--path-excludes``、``--ignore-case``、
+      ``--all-lines``、``--context-chars``）也仍是字面值；
+    - ``--path-excludes <片段>``：路径排除片段，语义与取值规则同
+      ``--path-contains``；文件相对路径包含该片段即被排除，不读取其内容；
     - ``--ignore-case``：无取值的开关，可重复指定即报错；
     - ``--all-lines``：无取值的开关，每个命中行各返回一项，可重复指定即报错；
     - ``--context-chars <0-200>``：片段上下文的码点数，取紧随选项的一个
@@ -189,8 +196,8 @@ def _parse_args(args: list[str]) -> tuple[str, str, str | None, bool, bool, int]
 
     选项只允许出现在两个位置参数之后，相互先后顺序不限。不使用通用
     选项解析：两个位置参数按字面取值，因此以连字符开头的关键词（即使恰好
-    为 ``--ignore-case``、``--all-lines`` 或 ``--context-chars``）仍是
-    字面文本。
+    为 ``--path-contains``、``--path-excludes``、``--ignore-case``、
+    ``--all-lines`` 或 ``--context-chars``）仍是字面文本。
     """
     if len(args) < 2:
         raise ArgumentError(USAGE)
@@ -199,6 +206,7 @@ def _parse_args(args: list[str]) -> tuple[str, str, str | None, bool, bool, int]
     rest = args[2:]
 
     path_contains: str | None = None
+    path_excludes: str | None = None
     ignore_case = False
     all_lines = False
     context_chars = DEFAULT_CONTEXT_CHARS
@@ -213,6 +221,14 @@ def _parse_args(args: list[str]) -> tuple[str, str, str | None, bool, bool, int]
                 raise ArgumentError(f"错误: 选项 {PATH_OPTION} 缺少值")
             # 取值始终按字面消费，不把它解释成任何开关。
             path_contains = rest[index + 1]
+            index += 2
+        elif token == PATH_EXCLUDES_OPTION:
+            if path_excludes is not None:
+                raise ArgumentError(f"错误: 选项 {PATH_EXCLUDES_OPTION} 只能指定一次")
+            if index + 1 >= len(rest):
+                raise ArgumentError(f"错误: 选项 {PATH_EXCLUDES_OPTION} 缺少值")
+            # 取值始终按字面消费，不把它解释成任何开关。
+            path_excludes = rest[index + 1]
             index += 2
         elif token == IGNORE_CASE_OPTION:
             if ignore_case:
@@ -236,16 +252,30 @@ def _parse_args(args: list[str]) -> tuple[str, str, str | None, bool, bool, int]
         else:
             raise ArgumentError(f"错误: 无法识别的参数: {token}")
 
-    return target_dir, keyword, path_contains, ignore_case, all_lines, context_chars
+    return (
+        target_dir,
+        keyword,
+        path_contains,
+        path_excludes,
+        ignore_case,
+        all_lines,
+        context_chars,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
     try:
-        target_dir, keyword, path_contains, ignore_case, all_lines, context_chars = (
-            _parse_args(args)
-        )
+        (
+            target_dir,
+            keyword,
+            path_contains,
+            path_excludes,
+            ignore_case,
+            all_lines,
+            context_chars,
+        ) = _parse_args(args)
     except ArgumentError as exc:
         return _fail(str(exc))
 
@@ -253,6 +283,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _fail("错误: 关键词为空或全为空白")
     if path_contains is not None and not path_contains.strip():
         return _fail(f"错误: {PATH_OPTION} 的路径片段为空或全为空白")
+    if path_excludes is not None and not path_excludes.strip():
+        return _fail(f"错误: {PATH_EXCLUDES_OPTION} 的路径片段为空或全为空白")
     if not os.path.exists(target_dir):
         return _fail(f"错误: 目录不存在: {target_dir}")
     if not os.path.isdir(target_dir):
@@ -266,10 +298,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     results = []
     for path in file_paths:
         rel = _relative_path(path, target_dir)
-        # 先按路径决定文件是否参与内容检索：被排除的文件既不读取也不校验，
-        # 因此即使无法读取或含非法 UTF-8 字节也不会产生该文件的告警。
-        # 路径筛选始终区分大小写，不受 --ignore-case 影响。
+        # 先按路径决定文件是否参与内容检索：未通过路径筛选的文件既不读取也
+        # 不校验，因此即使无法读取或含非法 UTF-8 字节也不会产生该文件的告警。
+        # 路径筛选始终区分大小写、按连续字面子串比较，不受 --ignore-case 影响。
+        # 同时给出包含与排除片段时，文件须符合包含条件且不符合排除条件。
         if path_contains is not None and path_contains not in rel:
+            continue
+        if path_excludes is not None and path_excludes in rel:
             continue
         try:
             hits = _search_file(path, keyword, ignore_case, all_lines, context_chars)

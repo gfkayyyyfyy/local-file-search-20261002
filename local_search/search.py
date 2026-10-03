@@ -1,7 +1,8 @@
 """目录文本检索的最小实现。
 
 用法：
-    python -m local_search <目录> <关键词> [--path-contains <路径片段>] [--ignore-case]
+    python -m local_search <目录> <关键词> [--path-contains <路径片段>]
+                           [--ignore-case] [--all-lines]
 
 仅依赖 Python 3 标准库，离线运行，只读扫描源文件，不生成索引。
 """
@@ -15,9 +16,10 @@ SUPPORTED_SUFFIXES = (".txt", ".md")
 CONTEXT_CHARS = 30
 PATH_OPTION = "--path-contains"
 IGNORE_CASE_OPTION = "--ignore-case"
+ALL_LINES_OPTION = "--all-lines"
 USAGE = (
     "用法: python -m local_search <目录> <关键词> "
-    "[--path-contains <路径片段>] [--ignore-case]"
+    "[--path-contains <路径片段>] [--ignore-case] [--all-lines]"
 )
 
 # 仅折叠 ASCII 的 A-Z 到 a-z；translate 按码点一一映射，不产生多字符展开
@@ -89,8 +91,13 @@ def _collect_files(root: str) -> list[str]:
     return collected
 
 
-def _search_file(path: str, keyword: str, ignore_case: bool = False) -> dict | None:
-    """在单个文件中查找首个单行命中，返回结果项；无命中返回 None。
+def _search_file(
+    path: str,
+    keyword: str,
+    ignore_case: bool = False,
+    all_lines: bool = False,
+) -> list[dict]:
+    """在单个文件中查找单行命中，返回结果项列表（无命中返回空列表）。
 
     先完整读取并按 UTF-8 解码整个文件：非法字节无论出现在命中之前、之后
     还是文件末尾（包括末尾截断的多字节字符），都会抛出 UnicodeDecodeError，
@@ -99,10 +106,15 @@ def _search_file(path: str, keyword: str, ignore_case: bool = False) -> dict | N
     ignore_case 为真时，仅把 ASCII 的 A-Z/a-z 视为同一字符；其他字符仍精确
     比较（É 不匹配 é、ß 不匹配 ss）。匹配只用于定位，返回的片段始终取自
     源文本，保留原始大小写。
+
+    all_lines 为假（默认）时只返回按行号、行内位置确定的首个命中；
+    all_lines 为真时每个命中行各返回一项，按行号递增排列。同一行多次出现
+    关键词仍只产生一项，片段以该行最左侧命中为中心。
     """
     with open(path, "r", encoding="utf-8") as handle:
         content = handle.read()
     folded_keyword = _ascii_lower(keyword) if ignore_case else keyword
+    hits: list[dict] = []
     for line_number, raw_line in enumerate(content.split("\n"), start=1):
         line = raw_line.rstrip("\r\n")
         if ignore_case:
@@ -113,24 +125,29 @@ def _search_file(path: str, keyword: str, ignore_case: bool = False) -> dict | N
             continue
         start = max(0, position - CONTEXT_CHARS)
         end = min(len(line), position + len(keyword) + CONTEXT_CHARS)
-        return {
-            "line": line_number,
-            "snippet": line[start:end],
-        }
-    return None
+        hits.append(
+            {
+                "line": line_number,
+                "snippet": line[start:end],
+            }
+        )
+        if not all_lines:
+            break
+    return hits
 
 
-def _parse_args(args: list[str]) -> tuple[str, str, str | None, bool]:
+def _parse_args(args: list[str]) -> tuple[str, str, str | None, bool, bool]:
     """解析参数：恰好两个位置参数，其后可出现选项。
 
     支持的选项：
     - ``--path-contains <片段>``：路径片段取紧随选项的一个参数，该值即使
-      看起来像选项（包括 ``--ignore-case``）也仍是字面值；
-    - ``--ignore-case``：无取值的开关，可重复指定即报错。
+      看起来像选项（包括 ``--ignore-case``、``--all-lines``）也仍是字面值；
+    - ``--ignore-case``：无取值的开关，可重复指定即报错；
+    - ``--all-lines``：无取值的开关，每个命中行各返回一项，可重复指定即报错。
 
-    两组选项只允许出现在两个位置参数之后，相互先后顺序不限。不使用通用
+    选项只允许出现在两个位置参数之后，相互先后顺序不限。不使用通用
     选项解析：两个位置参数按字面取值，因此以连字符开头的关键词（即使恰好
-    为 ``--ignore-case``）仍是字面文本。
+    为 ``--ignore-case`` 或 ``--all-lines``）仍是字面文本。
     """
     if len(args) < 2:
         raise ArgumentError(USAGE)
@@ -140,6 +157,7 @@ def _parse_args(args: list[str]) -> tuple[str, str, str | None, bool]:
 
     path_contains: str | None = None
     ignore_case = False
+    all_lines = False
     index = 0
     while index < len(rest):
         token = rest[index]
@@ -156,17 +174,22 @@ def _parse_args(args: list[str]) -> tuple[str, str, str | None, bool]:
                 raise ArgumentError(f"错误: 选项 {IGNORE_CASE_OPTION} 只能指定一次")
             ignore_case = True
             index += 1
+        elif token == ALL_LINES_OPTION:
+            if all_lines:
+                raise ArgumentError(f"错误: 选项 {ALL_LINES_OPTION} 只能指定一次")
+            all_lines = True
+            index += 1
         else:
             raise ArgumentError(f"错误: 无法识别的参数: {token}")
 
-    return target_dir, keyword, path_contains, ignore_case
+    return target_dir, keyword, path_contains, ignore_case, all_lines
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
     try:
-        target_dir, keyword, path_contains, ignore_case = _parse_args(args)
+        target_dir, keyword, path_contains, ignore_case, all_lines = _parse_args(args)
     except ArgumentError as exc:
         return _fail(str(exc))
 
@@ -193,17 +216,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         if path_contains is not None and path_contains not in rel:
             continue
         try:
-            hit = _search_file(path, keyword, ignore_case)
+            hits = _search_file(path, keyword, ignore_case, all_lines)
         except UnicodeDecodeError as exc:
             _emit_stderr(f"警告: 跳过文件 {rel}: 无法按 UTF-8 解码 ({exc})")
             continue
         except OSError as exc:
             _emit_stderr(f"警告: 跳过文件 {rel}: 无法读取 ({exc})")
             continue
-        if hit is not None:
+        for hit in hits:
             results.append({"path": rel, "line": hit["line"], "snippet": hit["snippet"]})
 
-    results.sort(key=lambda item: item["path"])
+    # 先按路径的区分大小写 Unicode 码点序，同一路径再按行号递增。
+    results.sort(key=lambda item: (item["path"], item["line"]))
 
     payload = json.dumps(results, ensure_ascii=False)
     sys.stdout.buffer.write(payload.encode("utf-8") + b"\n")

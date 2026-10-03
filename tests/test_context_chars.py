@@ -332,6 +332,70 @@ class ContextCharsTest(unittest.TestCase):
         proc = run_args(self.root / "不存在的目录", "target", CONTEXT_CHARS, "x")
         self.assert_argument_error(proc, "ASCII 十进制数字串", "先校验选项")
 
+    # -- 7b. 超长取值：不设长度上限，按数值判断，不触发 int() 位数限制 -------
+
+    def test_long_leading_zeros_accepted_by_value(self) -> None:
+        # 5000 位数字串远超 Python 3.11+ int() 默认位数上限，仍须按数值处理。
+        self._write_text("a.txt", "甲乙Target丙丁\n")
+
+        zeros = self.assert_success_clean(
+            run_args(self.root, "Target", CONTEXT_CHARS, "0" * 5000), "5000 个零"
+        )
+        self.assertEqual(
+            zeros,
+            [{"path": "a.txt", "line": 1, "snippet": "Target"}],
+            "5000 个零应按 0 处理，片段只保留命中关键词",
+        )
+
+        two = self.assert_success_clean(
+            run_args(self.root, "Target", CONTEXT_CHARS, "0" * 5000 + "2"), "5000 个零后接 2"
+        )
+        self.assertEqual(
+            two,
+            [{"path": "a.txt", "line": 1, "snippet": "甲乙Target丙丁"}],
+            "5000 个零后接 2 应按 2 处理",
+        )
+
+    def test_long_leading_zeros_before_200_accepted(self) -> None:
+        line = "x" * 300 + "target" + "y" * 300
+        self._write_text("big.txt", line + "\n")
+
+        results = self.assert_success_clean(
+            run_args(self.root, "target", CONTEXT_CHARS, "0" * 5000 + "200"),
+            "5000 个零后接 200",
+        )
+        self.assertEqual(
+            results,
+            [{"path": "big.txt", "line": 1, "snippet": "x" * 200 + "target" + "y" * 200}],
+            "5000 个零后接 200 应按 200 处理",
+        )
+
+    def test_long_out_of_range_values_are_argument_errors(self) -> None:
+        for value, label in (
+            ("0" * 5000 + "201", "5000 个零后接 201"),
+            ("9" * 5000, "5000 个 9"),
+        ):
+            with self.subTest(label=label):
+                proc = run_args(self.root, "target", CONTEXT_CHARS, value)
+                self.assert_argument_error(proc, "超出范围", f"超长超范围 {label}")
+
+    def test_long_value_with_illegal_char_is_format_error(self) -> None:
+        # 即使数字部分很长，只要混入非法字符，仍报告格式错误而非超范围。
+        for value, label in (
+            ("0" * 5000 + "2a", "长串尾部含字母"),
+            ("9" * 2500 + "x" + "9" * 2500, "长串中间含字母"),
+        ):
+            with self.subTest(label=label):
+                proc = run_args(self.root, "target", CONTEXT_CHARS, value)
+                self.assert_argument_error(proc, "ASCII 十进制数字串", f"长串格式非法 {label}")
+
+    def test_long_value_error_happens_before_any_scan(self) -> None:
+        # 超长取值超范围与不存在的目录同时出现时，仍优先报告参数错误。
+        proc = run_args(
+            self.root / "不存在的目录", "target", CONTEXT_CHARS, "0" * 5000 + "201"
+        )
+        self.assert_argument_error(proc, "超出范围", "超长取值先校验")
+
     # -- 8. 无命中与只读语义 --------------------------------------------------
 
     def test_no_hit_returns_empty_array(self) -> None:

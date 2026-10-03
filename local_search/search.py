@@ -98,14 +98,25 @@ def _collect_files(root: str) -> list[str]:
 def _parse_context_chars(raw: str) -> int:
     """解析 --context-chars 的取值：非空 ASCII 十进制数字串，0 到 200。
 
-    允许前导零（如 ``007`` 即 7）；首尾空白、正负号、小数点、非 ASCII
-    数字（如全角数字）一律拒绝。
+    允许前导零（如 ``007`` 即 7），前导零的数量不影响数值，也不设字符串
+    长度上限；首尾空白、正负号、小数点、非 ASCII 数字（如全角数字）一律
+    拒绝。
+
+    Python 3.11 及以上默认拒绝把超过 4300 位的数字串直接传给 ``int()``，
+    因此不能对超长取值直接转换。合法数值至多三位，先剔除不影响数值的
+    前导零：剩余位数超过三位必然大于 200，按超范围处理；其余至多三位，
+    转换不受整数长度限制影响，始终按数值而非字符串长度判断合法性。
     """
     if not raw or not raw.isascii() or not raw.isdecimal():
         raise ArgumentError(
             f"错误: 选项 {CONTEXT_CHARS_OPTION} 的值必须是非空的 ASCII 十进制数字串: {raw!r}"
         )
-    value = int(raw)
+    digits = raw.lstrip("0")
+    if len(digits) > 3:
+        raise ArgumentError(
+            f"错误: 选项 {CONTEXT_CHARS_OPTION} 的值超出范围 0-{MAX_CONTEXT_CHARS}: {raw!r}"
+        )
+    value = int(digits) if digits else 0
     if value > MAX_CONTEXT_CHARS:
         raise ArgumentError(
             f"错误: 选项 {CONTEXT_CHARS_OPTION} 的值超出范围 0-{MAX_CONTEXT_CHARS}: {raw!r}"

@@ -24,6 +24,7 @@
 离线运行。期望值全部以字面量直接写出，不调用任何被测函数来生成期望结果。
 """
 
+import io
 import json
 import os
 import subprocess
@@ -31,13 +32,21 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+import local_search
 
 CONTEXT_CHARS = "--context-chars"
 ALL_LINES = "--all-lines"
 IGNORE_CASE = "--ignore-case"
 PATH_OPTION = "--path-contains"
+
+# 超过 Python 3.11 默认整数字符串转换长度限制（4300 位）的取值长度。
+LONG = 5000
 
 
 def run_args(directory: Path, *argv: str) -> subprocess.CompletedProcess:
@@ -47,6 +56,22 @@ def run_args(directory: Path, *argv: str) -> subprocess.CompletedProcess:
         cwd=PROJECT_ROOT,
         capture_output=True,
     )
+
+
+class _CapturedStream:
+    """sys.stdout/sys.stderr 的最小替身：被测代码只使用其 .buffer 写字节。"""
+
+    def __init__(self) -> None:
+        self.buffer = io.BytesIO()
+
+
+def run_main(directory: Path, *argv: str) -> tuple:
+    """直接调用公开入口 local_search.main，返回 (返回值, 标准输出字节, 标准错误字节)。"""
+    stdout = _CapturedStream()
+    stderr = _CapturedStream()
+    with mock.patch.object(sys, "stdout", stdout), mock.patch.object(sys, "stderr", stderr):
+        code = local_search.main([str(directory), *argv])
+    return code, stdout.buffer.getvalue(), stderr.buffer.getvalue()
 
 
 class ContextCharsTest(unittest.TestCase):
@@ -177,6 +202,99 @@ class ContextCharsTest(unittest.TestCase):
             [{"path": "a.txt", "line": 1, "snippet": "乙丙Target丁戊"}],
             "取值 002 应按 2 处理",
         )
+
+    # -- 2b. 超长取值：超过 3.11 默认整数转换长度限制（4300 位）时仍按数值判断
+
+    def test_long_acceptance_values_judged_by_numeric_value(self) -> None:
+        # 验收：a.txt 只有一行 甲乙Target丙丁，关键词 Target。
+        self._write_text("a.txt", "甲乙Target丙丁")
+
+        cases = [
+            ("0" * LONG, [{"path": "a.txt", "line": 1, "snippet": "Target"}], "5000 个零按 0"),
+            (
+                "0" * LONG + "2",
+                [{"path": "a.txt", "line": 1, "snippet": "甲乙Target丙丁"}],
+                "5000 个零后接 2 按 2",
+            ),
+            (
+                "0" * LONG + "200",
+                [{"path": "a.txt", "line": 1, "snippet": "甲乙Target丙丁"}],
+                "5000 个零后接 200 按 200",
+            ),
+        ]
+        for value, expected, label in cases:
+            with self.subTest(label=label):
+                proc = run_args(self.root, "Target", CONTEXT_CHARS, value)
+                results = self.assert_success_clean(proc, label)
+                self.assertEqual(results, expected, f"{label}：合法取值不得因数字串过长而失败")
+                self.assertEqual(proc.stdout.decode("utf-8").strip(), json.dumps(expected, ensure_ascii=False))
+
+    def test_long_out_of_range_values_are_argument_errors(self) -> None:
+        cases = [
+            ("0" * LONG + "201", "5000 个零后接 201 超范围"),
+            ("9" * LONG, "5000 个 9 超范围"),
+        ]
+        for value, label in cases:
+            with self.subTest(label=label):
+                proc = run_args(self.root, "target", CONTEXT_CHARS, value)
+                self.assert_argument_error(proc, "超出范围", label)
+                self.assertNotIn(b"Traceback", proc.stderr, f"{label}：不得向用户输出异常堆栈")
+
+    def test_long_value_with_illegal_char_is_format_error(self) -> None:
+        # 即使数字部分很长，只要混入非法字符就报格式错误，而非超范围或堆栈。
+        cases = [
+            ("0" * LONG + " ", "超长后尾随空白"),
+            (" " + "0" * LONG, "超长前有空白"),
+            ("0" * LONG + "a", "超长后接字母"),
+            ("0" * LONG + ".5", "超长后接小数部分"),
+            ("0" * LONG + "１", "超长后接全角数字"),
+            ("0" * (LONG // 2) + "x" + "0" * (LONG // 2), "超长串中间夹字母"),
+        ]
+        for value, label in cases:
+            with self.subTest(label=label):
+                proc = run_args(self.root, "target", CONTEXT_CHARS, value)
+                self.assert_argument_error(proc, "ASCII 十进制数字串", f"格式非法 {label}")
+                self.assertNotIn(b"Traceback", proc.stderr, f"{label}：不得向用户输出异常堆栈")
+
+    def test_long_values_via_main_entrypoint_share_behavior(self) -> None:
+        # local_search.main 入口同样按数值判断：合法返回 0、非法返回 2，
+        # 均不抛出异常、不产生堆栈。
+        self._write_text("a.txt", "甲乙Target丙丁")
+
+        code, out, err = run_main(self.root, "Target", CONTEXT_CHARS, "0" * LONG)
+        self.assertEqual(code, 0)
+        self.assertEqual(err, b"")
+        self.assertEqual(
+            json.loads(out.decode("utf-8")),
+            [{"path": "a.txt", "line": 1, "snippet": "Target"}],
+        )
+
+        code, out, err = run_main(self.root, "Target", CONTEXT_CHARS, "0" * LONG + "2")
+        self.assertEqual(code, 0)
+        self.assertEqual(err, b"")
+        self.assertEqual(
+            json.loads(out.decode("utf-8")),
+            [{"path": "a.txt", "line": 1, "snippet": "甲乙Target丙丁"}],
+        )
+
+        for value, reason, label in (
+            ("9" * LONG, "超出范围", "main：5000 个 9 超范围"),
+            ("0" * LONG + "x", "ASCII 十进制数字串", "main：超长串混入字母为格式错误"),
+        ):
+            with self.subTest(label=label):
+                code, out, err = run_main(self.root, "target", CONTEXT_CHARS, value)
+                self.assertEqual(code, 2, f"{label}：main 返回值应为 2")
+                self.assertEqual(out, b"", f"{label}：标准输出必须为空")
+                stderr_text = err.decode("utf-8")
+                self.assertIn(CONTEXT_CHARS, stderr_text)
+                self.assertIn(reason, stderr_text)
+                self.assertNotIn("Traceback", stderr_text, f"{label}：不得输出异常堆栈")
+
+    def test_long_argument_error_precedes_missing_directory_scan(self) -> None:
+        # 与不存在的目录同时出现时，仍优先报告参数错误，而非目录错误。
+        proc = run_args(self.root / "不存在的目录", "target", CONTEXT_CHARS, "9" * LONG)
+        self.assert_argument_error(proc, "超出范围", "超长超范围先于目录扫描")
+        self.assertNotIn(b"Traceback", proc.stderr)
 
     # -- 3. 码点语义：中文与补充平面字符各算一个；关键词长度不计入额度 --------
 

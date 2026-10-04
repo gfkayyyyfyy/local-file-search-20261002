@@ -16,7 +16,7 @@
 在项目根目录下执行：
 
 ```bash
-python -m local_search <目录> <关键词> [--path-contains <路径片段>] [--path-excludes <路径片段>] [--ignore-case] [--all-lines] [--context-chars <0-200>] [--file-type <txt|md>] [--and-keyword <附加关键词>]
+python -m local_search <目录> <关键词> [--path-contains <路径片段>] [--path-excludes <路径片段>] [--ignore-case] [--all-lines] [--context-chars <0-200>] [--file-type <txt|md>] [--and-keyword <附加关键词>] [--not-keyword <排除关键词>]
 ```
 
 - `<目录>`：要扫描的目录，支持绝对路径或相对于当前工作目录的相对路径，可包含中文或空格（记得加引号）。
@@ -27,6 +27,7 @@ python -m local_search <目录> <关键词> [--path-contains <路径片段>] [--
 - `--path-excludes <路径片段>`：可选的带取值选项，只能写在两个位置参数之后，可与其他选项（含 `--path-contains`）以任意先后顺序同用。文件**相对于选定目录、统一使用正斜杠**的路径中只要**区分大小写地连续包含该字面子串**，该文件即被排除、不参与内容检索：不读取文件内容，因此即使文件无法读取或含非法 UTF-8 字节也不告警。不解释正则或通配符，片段首尾空格按原样比较，匹配**不受 `--ignore-case` 影响**，选定目录本身的名称不参与比较。与 `--path-contains` 同用时，文件须符合包含条件且不符合排除条件才参与检索；两个片段相同时所有文件都被排除，输出 `[]`。取值即使看似开关（如 `--ignore-case`）也按字面片段处理，不启用任何开关；第二个位置参数或其他选项的取值即使恰好写作 `--path-excludes`，也仍按字面文本处理。缺少取值、重复指定、值为空或全为空白时在扫描前报错（退出码 2、标准输出为空）。
 - `--file-type <txt|md>`：可选的带取值选项，只能写在两个位置参数之后，可与其他选项以任意先后顺序同用，每次最多指定一次。取值**仅接受小写字面值 `txt` 或 `md`**：`txt` 只选择扩展名为 `.txt` 的普通文件，`md` 只选择 `.md`，扩展名比较仍忽略大小写（如 `notes/b.MD` 计入 md）。空值、纯空白、首尾空白、大写值（如 `TXT`、`Md`）及其他格式（如 `markdown`、`log`、`.txt`）均为非法取值。未传该选项时继续同时检索两种格式。格式条件与路径包含、排除条件共同生效，只有满足全部条件的文件才参与内容匹配；被格式条件排除的文件不读取、不告警。被选中的不可读或非法 UTF-8 文件仍按既有规则告警后跳过，其余文件继续检索，退出码为 0。紧随该选项的参数即使看似开关（如 `--ignore-case`）也作为其值校验，不开启该开关；第二个位置参数或其他路径选项的取值即使恰好写作 `--file-type`，也仍按字面文本处理。缺值、重复指定或非法取值均在扫描前报错（退出码 2、标准输出为空）。
 - `--and-keyword <附加关键词>`：可选的带取值选项，只能写在两个位置参数之后，可与其他选项以任意先后顺序同用，每次最多指定一次。指定后**同一行须分别包含主关键词与该附加关键词**才算命中：两词均按连续字面子串匹配（不拆词、不解释正则或通配符，首尾空格按原样保留），必须出现在同一行内，分处不同行不能合并；两者出现顺序不限，相同关键词或重叠匹配可共用文字。默认区分大小写；`--ignore-case` 同时作用于两个关键词，仍只折叠 ASCII 字母。默认每个文件返回行号最小的合格行，`--all-lines` 时每个合格行各返回一项，行内重复出现不增加结果；`snippet` 仍只围绕**主关键词**在该行最左侧的命中，`--context-chars` 沿用既有规则，不为展示附加关键词扩大片段。紧随该选项的参数即使看似开关（如 `--all-lines`）也按文本处理，不开启该开关；第二个位置参数或其他选项取值中的 `--and-keyword` 仍按字面处理。缺少取值、重复指定、值为空或全为空白时在扫描前报错（退出码 2、标准输出为空、原因写入标准错误）。未指定该选项时既有行为完全不变。
+- `--not-keyword <排除关键词>`：可选的带取值选项，只能写在两个位置参数之后，可与其他选项以任意先后顺序同用，每次最多指定一次。指定后**完整当前行不包含该排除关键词**才算命中：一行须先满足主关键词及已提供的 `--and-keyword` 条件，同时行内任何位置（包括片段范围之外）都不得出现排除词；排除词在其他行出现不影响本行。排除词按连续字面子串比较（不拆词、不解释正则或通配符，首尾空格按原样保留），默认区分大小写；`--ignore-case` 同时作用于排除词，仍只折叠 ASCII 字母。默认每个文件返回行号最小的合格行，较早行被排除后继续寻找后续行；`--all-lines` 时每个合格行各返回一项，行内重复出现不增加结果。`snippet` 仍只围绕**主关键词**在该行最左侧的命中，`--context-chars` 沿用既有规则，排除词不改变片段取法。排除词与主关键词相同或没有合格行时输出 `[]`、退出码 0。紧随该选项的参数即使看似开关（如 `--all-lines`）也按文本处理，不开启该开关；第二个位置参数或其他选项取值中的 `--not-keyword` 仍按字面处理。缺少取值、重复指定、值为空或全为空白时在扫描前报错（退出码 2、标准输出为空、原因写入标准错误）。未指定该选项时既有行为完全不变。
 - 只扫描该目录及其子目录中的普通文件，扩展名（大小写不敏感）为 `.txt` 或 `.md`；不跟随符号链接。
 - 匹配限定在单行内；默认每个文件只返回按行号、行内位置确定的**首个命中**，同一文件多个命中不重复返回；指定 `--all-lines` 后同一文件的每个命中行各返回一项（同一行的多次出现仍只算一项）。
 - 标准输出是一个 JSON 数组，每项仅含：
@@ -207,7 +208,25 @@ $ echo $?
 
 只有同一行分别包含 `target` 与 `budget` 才算命中：第 1、2 行各只含一个词，分处不同行不能合并；第 3、4 行合格。`--ignore-case` 同时折叠两个关键词的 ASCII 大小写；`snippet` 只围绕主关键词 `target` 在该行最左侧的命中（第 4 行片段是 `target` 而非 `budget`），`--context-chars 0` 时片段只保留完整命中关键词。默认只返回行号最小的合格行（第 3 行），追加 `--all-lines` 后第 4 行也各返回一项。
 
-### 13. 错误情形（退出码 2，标准输出为空，原因写入标准错误）
+### 13. 用 --not-keyword 排除含指定词的行
+
+准备一个仅含 `a.txt` 的目录 `演示目录`，四行依次为 `Target DRAFT budget`、`budget target target`、`draft target budget`、`target budget`。
+
+```bash
+$ python -m local_search 演示目录 target --not-keyword draft --and-keyword budget --ignore-case --context-chars 0
+[{"path": "a.txt", "line": 2, "snippet": "target"}]
+$ echo $?
+0
+
+$ python -m local_search 演示目录 target --not-keyword draft --and-keyword budget --ignore-case --context-chars 0 --all-lines
+[{"path": "a.txt", "line": 2, "snippet": "target"}, {"path": "a.txt", "line": 4, "snippet": "target"}]
+$ echo $?
+0
+```
+
+一行须同时包含 `target` 与 `budget`、且整行不含 `draft` 才算合格：第 1 行的 `DRAFT` 与第 3 行的 `draft` 在 `--ignore-case` 下都视为排除词，这两行被跳过；默认只返回行号最小的合格行（第 2 行），追加 `--all-lines` 后第 4 行也各返回一项。排除判断覆盖完整当前行（词在片段之外仍能排除该行），但 `snippet` 仍只围绕主关键词 `target` 的最左侧命中。排除词与主关键词相同或没有合格行时输出 `[]`、退出码 0。
+
+### 14. 错误情形（退出码 2，标准输出为空，原因写入标准错误）
 
 ```bash
 $ python -m local_search "不存在的目录" target
@@ -294,6 +313,21 @@ $ python -m local_search "资料" target --and-keyword a --and-keyword b
 错误: 选项 --and-keyword 只能指定一次
 $ echo $?
 2
+
+$ python -m local_search "资料" target --not-keyword
+错误: 选项 --not-keyword 缺少值
+$ echo $?
+2
+
+$ python -m local_search "资料" target --not-keyword "   "
+错误: --not-keyword 的排除关键词为空或全为空白
+$ echo $?
+2
+
+$ python -m local_search "资料" target --not-keyword a --not-keyword b
+错误: 选项 --not-keyword 只能指定一次
+$ echo $?
+2
 ```
 
-关键词为空或全为空白、重复指定任何选项（`--ignore-case`、`--all-lines`、`--context-chars`、`--path-contains`、`--path-excludes`、`--file-type`、`--and-keyword`）、带值选项缺少取值或取值格式/范围不合要求（此类错误在目录扫描开始前即报出）、`--path-contains`/`--path-excludes` 的路径片段为空或全为空白、`--file-type` 的取值为空、纯空白、含首尾空白、大写或非 `txt`/`md` 的其他格式、`--and-keyword` 的附加关键词为空或全为空白、出现无法识别的多余参数（注意选项只能写在两个位置参数之后，`--ignore-case`、`--all-lines` 出现在关键词之前会被当作多余参数）、目录不存在、路径不是目录或目录遍历失败时，均退出码 2、标准输出为空并在标准错误说明原因。
+关键词为空或全为空白、重复指定任何选项（`--ignore-case`、`--all-lines`、`--context-chars`、`--path-contains`、`--path-excludes`、`--file-type`、`--and-keyword`、`--not-keyword`）、带值选项缺少取值或取值格式/范围不合要求（此类错误在目录扫描开始前即报出）、`--path-contains`/`--path-excludes` 的路径片段为空或全为空白、`--file-type` 的取值为空、纯空白、含首尾空白、大写或非 `txt`/`md` 的其他格式、`--and-keyword` 的附加关键词或 `--not-keyword` 的排除关键词为空或全为空白、出现无法识别的多余参数（注意选项只能写在两个位置参数之后，`--ignore-case`、`--all-lines` 出现在关键词之前会被当作多余参数）、目录不存在、路径不是目录或目录遍历失败时，均退出码 2、标准输出为空并在标准错误说明原因。

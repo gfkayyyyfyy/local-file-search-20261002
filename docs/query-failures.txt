@@ -1,0 +1,342 @@
+查询失败说明：候选文件失败与目录遍历失败的结果差异
+====================================================
+
+本文档可与当前源码逐条核对，不描述任何新增功能。所有路径均为相对仓库根
+目录的相对路径，行号对应当前提交中的源文件。
+
+涉及文件：
+- local_search/search.py        检索实现（全部结论的出处）
+- local_search/__init__.py      公开入口导出（第 3 行 __all__、第 5 行
+                                from .search import main，故 local_search.main
+                                即 search.main）
+- local_search/__main__.py      命令入口 python -m local_search（第 6 行
+                                sys.exit(main(sys.argv[1:]))，main 的返回值
+                                即进程退出码）
+- tests/test_access_failures.py 访问失败回归测试（失败注入与端到端预期）
+- tests/test_utf8_whole_file.py 非法字节位置的回归测试
+
+
+0. 一句话结论
+-------------
+
+查询可能遇到两类性质完全不同的失败：
+
+- 目录层面失败（目录检查不通过、目录树无法完成遍历）是“致命错误”：
+  立即终止，退出码 2，标准输出零字节，不返回任何部分结果，原因写标准错误。
+- 候选文件层面失败（PermissionError、其他 OSError、UTF-8 解码失败）是
+  “逐文件告警”：该文件整体跳过，其余文件继续查询，退出码仍为 0，
+  告警逐文件写标准错误，不影响标准输出中的正常命中。
+
+判断查询是否完整结束：
+- 退出码 0 = 遍历完整结束，所有入选文件均已尝试处理；标准错误里可能有
+  若干“警告: 跳过文件 …”，它们表示个别候选文件被跳过，不表示查询中断。
+- 退出码 2 = 查询在目录阶段提前终止，标准输出为空，结果不可信为“完整”，
+  标准错误里有一条“错误: …”说明终止原因。
+
+
+1. 完整执行顺序（先后关系）
+---------------------------
+
+main()（local_search/search.py:494）严格按以下顺序执行；输出动作
+（sys.stdout.buffer.write，local_search/search.py:578）只发生在最后一步，
+因此此前任何失败路径的标准输出都必然为空。
+
+(1) 解析命令行参数 _parse_args（调用在 511 行；定义 398-491 行）。
+    参数不合法抛 ArgumentError，在 512-513 行经 _fail 处理（退出码 2）。
+    本文不展开参数规则。
+
+(2) 关键词与各字符串选项的空白校验（515-524 行），不通过同样经 _fail
+    返回 2。
+
+(3) 目录检查（525-528 行）：
+      525-526 行 os.path.exists 不成立 → “错误: 目录不存在: …”；
+      527-528 行 os.path.isdir 不成立 → “错误: 路径不是目录: …”。
+    二者都走 _fail（73-75 行：写一行标准错误并 return 2）。
+
+(4) 目录遍历（534-537 行）：_collect_files(target_dir, suffixes)
+    （定义 91-121 行）递归枚举整棵目录树，收集 .txt/.md 普通文件。
+    枚举抛 OSError 时包装为 TraversalError（103-104、117-118 行），
+    在 536-537 行被捕获，输出
+    “错误: 无法完成目录遍历 <选定目录>: <底层原因>”，return 2。
+
+(5) 逐文件处理循环（540-562 行）。对遍历收集到的每个路径，顺序为：
+    5a. 计算正斜杠相对路径 _relative_path（541 行；定义 78-83 行）。
+    5b. 路径筛选（546-549 行）：
+        --path-contains 不命中相对路径则 continue（546-547 行）；
+        --path-excludes 命中相对路径则 continue（548-549 行）。
+        筛选发生在打开文件之前。
+    5c. 读取并检索文件 _search_file（550-554 行调用；定义 236-303 行）。
+        其中先 open 再一次性 read 整个文件（275-276 行）。
+    5d. 失败处理：
+        UnicodeDecodeError → 555-557 行，告警
+          “警告: 跳过文件 <相对路径>: 无法按 UTF-8 解码 (<原因>)”，continue；
+        OSError（含 PermissionError，PermissionError 是 OSError 子类）
+          → 558-560 行，告警
+          “警告: 跳过文件 <相对路径>: 无法读取 (<原因>)”，continue。
+    5e. 命中追加到结果列表（561-562 行）。
+
+(6) 全部候选文件处理完后排序（565 行，按路径码点序、同行号递增）。
+
+(7) --limit 截断（570-571 行），在完整扫描、完整排序之后。
+
+(8) 序列化并输出（574-579 行），return 0（580 行）。
+    --format csv（默认选项值为 json，见 _OPTION_SPECS 388-393 行）：
+      csv 走 _render_csv（575 行；定义 317-335 行）；
+      否则走 JSON：json.dumps(results, ensure_ascii=False) 并追加换行
+      （577 行）。
+    标准输出统一经 sys.stdout.buffer 写入 UTF-8 字节（578-579 行）。
+
+
+2. 目录检查失败：退出码 2、标准输出为空
+---------------------------------------
+
+源码：local_search/search.py:525-528，失败经 _fail（73-75 行）。
+
+- 目录不存在（os.path.exists 为假，525-526 行）：
+  标准错误写入 “错误: 目录不存在: <用户给定路径>”。
+- 路径存在但不是目录（os.path.isdir 为假，527-528 行，例如指向普通
+  文件）：标准错误写入 “错误: 路径不是目录: <用户给定路径>”。
+- 两种情况均：退出码 2（_fail 第 75 行 return 2）；标准输出为空
+  （输出只在 578 行发生，此路径提前返回）；不做任何遍历和文件读取。
+
+
+3. 目录遍历失败：退出码 2、不返回部分结果
+-----------------------------------------
+
+源码：_collect_files（local_search/search.py:91-121）与
+main 的 534-537 行。
+
+枚举机制：内部函数 scan(dirpath)（99 行）用 os.scandir 列出目录项
+（101-102 行），随后逐项判断（106-116 行）：符号链接一律跳过
+（109-110 行）；子目录递归 scan（111-112 行）；普通文件按扩展名
+（忽略大小写，114-115 行）收集（116 行）。
+
+下列 OSError 都会被包装成 TraversalError 抛出：
+- os.scandir 自身失败（100-104 行的 except）——选定根目录或任一被
+  递归到的子目录无法枚举；
+- 对目录项调用 is_symlink()/is_dir()/is_file() 时失败
+  （107-118 行的 except）。
+
+main 在 536-537 行捕获后：
+- 退出码 2；
+- 标准输出零字节（结果序列化尚不存在，578 行不会执行）；
+- 标准错误为 “错误: 无法完成目录遍历 <选定目录>: <str(exc)>”，
+  即同时包含三要素：选定目录（target_dir，用户在命令行给定的路径）、
+  字样“无法完成目录遍历”、底层原因（原始 OSError 的 str）；
+- 不输出部分结果：异常一直抛出到 535 行的调用处，已收集到的
+  collected 列表随异常丢弃，此前即使枚举过正常文件也不会输出；
+- 不向用户打印异常堆栈（raise … from exc 只用于内部链，main 捕获后
+  只写一行错误信息）。
+
+
+4. 路径筛选只筛选“文件”，不能绕过目录枚举失败
+----------------------------------------------
+
+源码：local_search/search.py:534-549。
+
+先后关系是硬性的：_collect_files 在 535 行先把整棵树枚举完，
+--path-contains / --path-excludes 的判断在其后的 546-549 行才执行。
+因此：
+
+- 路径条件只作用于“已收集到的候选文件”的相对路径字符串，不影响、也
+  不能裁剪目录递归。某个子目录即使按路径片段看与筛选无关（例如
+  --path-contains a.txt 时的 notes/），仍会在 112 行被递归进入并
+  scandir；该子目录枚举失败照样在 537 行终止整个查询。
+- 结论：路径筛选不可能把“退出码 2 的遍历失败”变成“退出码 0 的空
+  结果”。
+- 反过来，对已通过遍历的候选文件，筛选先于打开文件（546-549 行在
+  550 行之前）：被排除的文件不会被 open，因此读取错误、非法 UTF-8
+  都不会为该文件产生告警；被 --file-type 排除的其他扩展名文件根本不
+  进入收集结果（533 行选择后缀集合，115 行过滤），同样不读不告警。
+
+
+5. 候选文件失败：整文件跳过、逐文件告警、退出码 0
+--------------------------------------------------
+
+源码：_search_file 的 open/read（local_search/search.py:275-276）与
+main 的 550-560 行。
+
+三类候选文件失败：
+
+(1) PermissionError：open 或 read 抛出，被 558 行的 except OSError
+    捕获（PermissionError 是 OSError 子类），559 行写
+    “警告: 跳过文件 <相对路径>: 无法读取 (<原因>)”。
+(2) 其他 OSError（如 EIO 等）：同样走 558-560 行，告警文案相同，
+    原因随异常不同而不同。
+(3) UTF-8 解码失败：_search_file 在 275-276 行先以 encoding="utf-8"
+    打开并一次性 read 整个文件；非法字节抛 UnicodeDecodeError，被
+    555-557 行单独捕获，写
+    “警告: 跳过文件 <相对路径>: 无法按 UTF-8 解码 (<原因>)”。
+
+共同行为（557、560 行均为 continue）：
+- 整个文件跳过：该文件不产生任何命中项，即使文件中本应有命中；
+- 循环继续处理其余候选文件，正常命中照常进入结果；
+- 退出码仍为 0（580 行），标准输出为其余文件的正常结果；
+- 告警只写标准错误，逐文件一行，由 _emit_stderr（66-70 行）以
+  UTF-8（errors="replace"）写入并刷新，不进入标准输出。
+
+非法字节出现在命中之后，仍使整文件失效：
+- 因为整个文件在 276 行先被完整读入、完整解码，逐行匹配在 285 行
+  之后才开始；解码失败时函数在 276 行即抛出，285-303 行的匹配循环
+  根本没有执行。非法字节位于命中之前、之后或文件末尾（含末尾截断的
+  多字节字符）没有区别（实现说明见 _search_file docstring
+  247-249 行）。回归测试见 tests/test_utf8_whole_file.py:
+  命中行之后、文件末尾的 0xff（43-55 行）与末尾截断的 0xc3
+  （77-93 行）都使整文件跳过。
+
+
+6. 被排除文件与 --limit：不读取、不告警；告警不被省略
+------------------------------------------------------
+
+- 被 --path-contains / --path-excludes 排除的文件在
+  local_search/search.py:546-549 行 continue，550 行的 _search_file
+  不会执行，因此不读取、不告警——哪怕该文件客观上无法读取或含非法
+  字节（实现注释见 542-545 行）。
+- --limit 在 570-571 行才截断已排序的结果，而所有候选文件的读取与
+  告警发生在 540-560 行的完整扫描期间。因此即使最终命中数已达上限，
+  候选坏文件的既有告警仍照常产生；--limit 只减少标准输出中的条目，
+  从不减少标准错误中的告警（实现说明见 567-569 行）。
+
+
+7. 没有剩余命中时的输出
+-----------------------
+
+当所有入选文件都无命中（或全部候选文件读取/解码失败被跳过）时：
+
+- JSON（默认或 --format json）：json.dumps([]) 序列化后为 []，
+  577 行追加一个换行，标准输出为 “[]\n”；退出码 0。
+- CSV（--format csv）：_render_csv 始终先放入固定表头
+  “path,line,snippet”（local_search/search.py:324），无结果项时
+  不再追加记录，输出仅为表头加 CRLF（335 行），即
+  “path,line,snippet\r\n”。
+- 两种格式下，候选文件告警都只在标准错误（556、559 行），不混入
+  标准输出；全部候选文件失败时仍为每个文件分别告警一条。
+
+
+8. 两组固定输入核对示例
+-----------------------
+
+两组示例的固定目录内容相同（与 tests/test_access_failures.py 中两个
+TestCase 的 setUp 完全一致，在 TemporaryDirectory 中准备）：
+
+  a.txt          两行：第 1 行 “alpha”，第 2 行 “target note”
+                 字节内容 b"alpha\ntarget note\n"
+                 （tests/test_access_failures.py:98 与 216 行）
+  notes/         子目录（99 行 / 217 行）
+  notes/b.md     唯一一行 “target again”
+                 字节内容 b"target again\n"（100 行 / 218 行）
+
+两组都查询关键词 target 并传入 --path-contains a.txt，即等价命令行：
+  python -m local_search <目录> target --path-contains a.txt
+
+按路径筛选，只有相对路径含 “a.txt” 的 a.txt 入选；notes/b.md 的相对
+路径 “notes/b.md” 不含该片段，在 546-547 行被排除。
+
+【第一组】只令后一个文件 notes/b.md 读取失败（open 抛
+PermissionError）；目录枚举全部正常。
+
+对应已有用例：
+  FileReadFailureTest.test_excluded_failed_file_is_never_read_and_produces_no_warning
+  （tests/test_access_failures.py:182-205）
+
+注入方式：mock.patch("local_search.search.open", …)（106-108 行），
+替身 _raising_open（63-75 行）仅对规范化路径等于 notes/b.md 的打开
+请求抛 PermissionError(EACCES, "Permission denied")（185-187 行），
+其余路径走真实 open。
+
+预期（用例断言逐条对应）：
+- 退出码 0（195 行断言）；
+- 标准输出的 JSON 仅一项（197-201 行断言）：
+  [{"path": "a.txt", "line": 2, "snippet": "target note"}]
+  即 a.txt 第 2 行（“alpha”不命中，第 2 行命中）；默认上下文额度为
+  30 个码点（DEFAULT_CONTEXT_CHARS，search.py:24），整行
+  “target note”即片段；
+- 标准错误为空 b""（202 行断言）。注意这里“读取失败”实际并未发生：
+  notes/b.md 在 546-547 行已被路径条件排除，550 行不会执行，替身
+  open 根本不会被该路径调用——用例通过 read_calls 集合显式断言
+  notes/b.md 未被打开（203-205 行；调用记录见 69-70 行）。这正说明：
+  被路径条件排除的文件即使预置了读取失败，也不读取、不告警。
+
+【第二组】只令 notes 子目录枚举失败（os.scandir(notes) 抛
+PermissionError）；不注入任何文件读取失败。
+
+对应已有用例：
+  TraversalFailureTest.test_path_filter_cannot_turn_traversal_failure_into_empty_success
+  （tests/test_access_failures.py:259-270）
+
+注入方式：mock.patch.object(os, "scandir", …)（224 行），替身
+_raising_scandir（78-88 行）仅对规范化路径等于 notes/ 的枚举请求抛
+PermissionError(EACCES, "Permission denied")（262-264 行），其余
+目录走真实 os.scandir。命令行同样带 --path-contains a.txt（267 行）。
+
+预期（由公共断言方法 _assert_traversal_abort 核对，227-234 行）：
+- 退出码 2（228 行断言）；
+- 标准输出完全为空 b""（229 行断言）——不是 “[]”，不含部分 JSON；
+- 标准错误包含选定目录（str(root)，231 行断言）、字样
+  “无法完成目录遍历”（232 行，对应 search.py:537）、底层原因
+  “Permission denied”（233 行），且不含 “Traceback”（234 行）。
+  尽管 a.txt 本会命中，筛选也只关心 a.txt，但遍历先于筛选
+  （search.py:535 在 546 行之前），notes/ 仍会在 112 行被递归枚举，
+  失败使整个查询终止。
+
+
+9. 测试如何模拟失败而不依赖系统权限
+------------------------------------
+
+tests/test_access_failures.py 的模块 docstring（18-21 行）说明：不使用
+chmod 或真实用户权限配置——这类手段在 Windows 与 Linux 上行为不一致，
+且 root 下 chmod 不生效。改用 unittest.mock 在进程内定向注入：
+
+- 文件读取失败：替换 local_search.search.open（106-108 行）。
+  _raising_open（63-75 行）把入参路径 os.path.normpath 归一化后查
+  failures 字典，命中则抛预定异常，未命中则委托真实 open。
+  PermissionError 与普通 OSError 两个变体分别见
+  test_permission_error_on_one_file_skips_it_and_keeps_others
+  （118-138 行，EACCES）和
+  test_other_oserror_on_one_file_is_also_skipped（140-157 行，EIO）；
+  两个候选文件全部失败、输出 [] 且各告警一条、退出码 0 见
+  test_all_candidate_files_fail_returns_empty_array_and_warns_each
+  （159-180 行）。
+- 目录枚举失败：替换 os.scandir（224 行）。_raising_scandir
+  （78-88 行）同样按归一化路径定向抛异常。根目录枚举失败见
+  test_root_directory_enumeration_failure_aborts（236-245 行）；
+  子目录 notes 失败且根下另有正常命中文件见
+  test_subdirectory_enumeration_failure_aborts_despite_hits
+  （247-257 行）；带 --path-contains 的同款失败即本文第二组
+  （259-270 行）。
+- 用例一律通过公开入口 local_search.main 驱动（run_main，54-60 行），
+  以其返回值作为退出码，并用替身捕获 sys.stdout/sys.stderr 的
+  .buffer（47-52、58 行），核对 UTF-8 字节，与 python -m local_search
+  的输入输出约定一致。资料在 TemporaryDirectory 中独立准备、自动
+  清理（94-97、211-214 行）。
+- 第一组用例还在查询前后快照全部文件字节并断言完全相同
+  （_snapshot_files 111-116 行，前后比对 123、138 行），固定了源文件
+  只读、不留索引的行为。
+
+
+10. 结论与源码定位速查
+----------------------
+
+结论                                        | 源码位置
+--------------------------------------------|----------------------------
+退出码 2 的唯一来源（写错误后 return 2）    | search.py:73-75（_fail）
+目录不存在 / 不是目录                       | search.py:525-528
+scandir/条目判断失败 → TraversalError       | search.py:100-104、107-118
+遍历失败的终止与错误文案（目录+字样+原因）  | search.py:534-537
+路径筛选先于打开文件                        | search.py:546-549 在 550 前
+整文件先读取、先完整 UTF-8 解码             | search.py:275-276
+UTF-8 失败告警并跳过                        | search.py:555-557
+OSError/PermissionError 告警并跳过          | search.py:558-560
+排序、--limit 在全部扫描之后                | search.py:565、570-571
+JSON 空结果 []                              | search.py:577
+CSV 空结果仅表头 path,line,snippet          | search.py:324、335
+正常结束 return 0、标准输出唯一写入点       | search.py:578-580
+命令入口（返回值=退出码）                    | __main__.py:6
+公开入口 local_search.main                  | __init__.py:3、5
+
+第一组示例对应测试：tests/test_access_failures.py:182-205
+第二组示例对应测试：tests/test_access_failures.py:259-270
+（公共断言 227-234；根目录/子目录失败另见 236-257）
+非法字节在命中之后仍整文件失效：
+  源码 search.py:275-276、555-557；
+  测试 tests/test_utf8_whole_file.py:43-55、77-93

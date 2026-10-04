@@ -1,6 +1,6 @@
 """参数解析流程的端到端回归测试（重构后集中验证共用规则）。
 
-``local_search.search`` 中九个选项的“去重 / 缺值 / 取值校验”改由统一的
+``local_search.search`` 中十个选项的“去重 / 缺值 / 取值校验”改由统一的
 规格表扫描循环完成后，本文件固定其对外可观察行为，防止重构改变：
 
 - 前两个参数按字面解释：即使关键词恰为 ``--all-lines``、``--file-type``
@@ -9,7 +9,7 @@
 - 带值选项的值始终按字面消费：``--path-contains --ignore-case`` 中的
   ``--ignore-case`` 是路径片段而非开关，``--context-chars``、
   ``--file-type`` 的值看似开关时也先被取值、再按各自格式报错；
-- 九个选项各自重复指定都报“只能指定一次”，七个带值选项缺紧随参数都报
+- 十个选项各自重复指定都报“只能指定一次”，八个带值选项缺紧随参数都报
   “缺少值”，无法识别的记号报“无法识别的参数”，且一律报告扫描到的第一个
   错误（多个错误并存时保持既有优先级）；
 - ``--context-chars`` 只接受非空 ASCII 十进制数字串、允许任意数量前导零、
@@ -18,6 +18,9 @@
   范围 1-1000；空白、正负号、小数、非 ASCII 数字、0 及超范围均拒绝；
 - ``--file-type`` 只接受小写字面值 ``txt`` 或 ``md``；空值、纯空白、
   首尾空白、大写值及其他格式均拒绝；
+- ``--format`` 只接受小写字面值 ``json`` 或 ``csv``，缺省为 ``json``；
+  空值、纯空白、首尾空白、大写值及其他取值均拒绝，看似开关的取值仍
+  作为格式值校验；
 - 缺位置参数报用法，关键词或路径片段为空 / 全空白报对应文案；以上错误均在
   目录扫描前以退出码 2、空标准输出、单行中文标准错误返回，不出现异常堆栈；
 - 同一组选项任意调换顺序，标准输出 / 标准错误 / 退出码完全一致。
@@ -48,13 +51,14 @@ FILE_TYPE_OPTION = "--file-type"
 AND_KEYWORD_OPTION = "--and-keyword"
 NOT_KEYWORD_OPTION = "--not-keyword"
 LIMIT_OPTION = "--limit"
+FORMAT_OPTION = "--format"
 USAGE_LINE = (
     "用法: python -m local_search <目录> <关键词> "
     "[--path-contains <路径片段>] [--path-excludes <路径片段>] "
     "[--ignore-case] [--all-lines] "
     "[--context-chars <0-200>] [--file-type <txt|md>] "
     "[--and-keyword <附加关键词>] [--not-keyword <排除关键词>] "
-    "[--limit <1-1000>]"
+    "[--limit <1-1000>] [--format <json|csv>]"
 )
 
 
@@ -77,7 +81,8 @@ class ParseArgsUnitTest(unittest.TestCase):
     def test_defaults_when_no_options(self) -> None:
         self.assertEqual(
             _parse_args(["some-dir", "target"]),
-            ("some-dir", "target", None, None, False, False, 30, None, None, None, None),
+            ("some-dir", "target", None, None, False, False, 30, None, None, None,
+             None, "json"),
         )
 
     def test_all_options_parsed_in_declared_tuple_order(self) -> None:
@@ -101,26 +106,30 @@ class ParseArgsUnitTest(unittest.TestCase):
                 "draft",
                 LIMIT_OPTION,
                 "2",
+                FORMAT_OPTION,
+                "csv",
             ]
         )
         self.assertEqual(
             parsed,
             ("some-dir", "TARGET", "notes/", "private/", True, True, 0, "txt",
-             "budget", "draft", 2),
+             "budget", "draft", 2, "csv"),
         )
 
     def test_option_token_as_keyword_stays_literal(self) -> None:
         # 关键词恰为开关记号时，后面的位置才进入选项扫描。
         self.assertEqual(
             _parse_args(["some-dir", ALL_LINES_OPTION, IGNORE_CASE_OPTION]),
-            ("some-dir", ALL_LINES_OPTION, None, None, True, False, 30, None, None, None, None),
+            ("some-dir", ALL_LINES_OPTION, None, None, True, False, 30, None, None,
+             None, None, "json"),
         )
 
     def test_option_token_as_file_type_keyword_stays_literal(self) -> None:
         # 关键词恰为 --file-type 时仍是字面文本，后面的参数才进入选项扫描。
         self.assertEqual(
             _parse_args(["some-dir", FILE_TYPE_OPTION, IGNORE_CASE_OPTION]),
-            ("some-dir", FILE_TYPE_OPTION, None, None, True, False, 30, None, None, None, None),
+            ("some-dir", FILE_TYPE_OPTION, None, None, True, False, 30, None, None,
+             None, None, "json"),
         )
 
     def test_option_token_as_value_stays_literal(self) -> None:
@@ -157,6 +166,7 @@ class ParseArgsUnitTest(unittest.TestCase):
             [AND_KEYWORD_OPTION, "a", AND_KEYWORD_OPTION, "b"],
             [NOT_KEYWORD_OPTION, "a", NOT_KEYWORD_OPTION, "b"],
             [LIMIT_OPTION, "1", LIMIT_OPTION, "2"],
+            [FORMAT_OPTION, "json", FORMAT_OPTION, "csv"],
         )
         for tail in cases:
             name = tail[0]
@@ -176,6 +186,7 @@ class ParseArgsUnitTest(unittest.TestCase):
             AND_KEYWORD_OPTION,
             NOT_KEYWORD_OPTION,
             LIMIT_OPTION,
+            FORMAT_OPTION,
         ):
             with self.subTest(name=name):
                 with self.assertRaises(ArgumentError) as caught:
@@ -226,6 +237,48 @@ class ParseArgsUnitTest(unittest.TestCase):
             str(caught.exception),
             f"错误: 选项 {FILE_TYPE_OPTION} 的值必须是小写的 txt 或 md: "
             f"{IGNORE_CASE_OPTION!r}",
+        )
+
+    def test_format_values_parsed_or_rejected(self) -> None:
+        self.assertEqual(_parse_args(["d", "k", FORMAT_OPTION, "json"])[11], "json")
+        self.assertEqual(_parse_args(["d", "k", FORMAT_OPTION, "csv"])[11], "csv")
+        bad_values = (
+            "",
+            " ",
+            "  ",
+            " json",
+            "json ",
+            " JSON ",
+            "JSON",
+            "CSV",
+            "Csv",
+            "Json",
+            "xml",
+            "tsv",
+            "json\n",
+            "json,csv",
+        )
+        for raw in bad_values:
+            with self.subTest(raw=raw):
+                with self.assertRaises(ArgumentError) as caught:
+                    _parse_args(["d", "k", FORMAT_OPTION, raw])
+                self.assertEqual(
+                    str(caught.exception),
+                    f"错误: 选项 {FORMAT_OPTION} 的值必须是小写的 json 或 csv: "
+                    f"{raw!r}",
+                )
+
+    def test_format_value_equal_to_switch_is_consumed_as_value(self) -> None:
+        # --format 的取值看似开关时先按字面消费，再按非法取值报错，
+        # 不会开启该开关。
+        with self.assertRaises(ArgumentError) as caught:
+            _parse_args(
+                ["d", "k", FORMAT_OPTION, ALL_LINES_OPTION]
+            )
+        self.assertEqual(
+            str(caught.exception),
+            f"错误: 选项 {FORMAT_OPTION} 的值必须是小写的 json 或 csv: "
+            f"{ALL_LINES_OPTION!r}",
         )
 
     def test_unknown_token_raises(self) -> None:
@@ -424,6 +477,7 @@ class ArgumentParsingCliTest(unittest.TestCase):
             AND_KEYWORD_OPTION: (AND_KEYWORD_OPTION, "a", AND_KEYWORD_OPTION, "b"),
             NOT_KEYWORD_OPTION: (NOT_KEYWORD_OPTION, "a", NOT_KEYWORD_OPTION, "b"),
             LIMIT_OPTION: (LIMIT_OPTION, "1", LIMIT_OPTION, "2"),
+            FORMAT_OPTION: (FORMAT_OPTION, "json", FORMAT_OPTION, "csv"),
         }
         for name, tail in cases.items():
             self.assertParseFailure(
@@ -442,6 +496,7 @@ class ArgumentParsingCliTest(unittest.TestCase):
             AND_KEYWORD_OPTION,
             NOT_KEYWORD_OPTION,
             LIMIT_OPTION,
+            FORMAT_OPTION,
         ):
             self.assertParseFailure(
                 f"错误: 选项 {name} 缺少值",
@@ -471,6 +526,28 @@ class ArgumentParsingCliTest(unittest.TestCase):
             "TARGET",
             FILE_TYPE_OPTION,
             IGNORE_CASE_OPTION,
+        )
+
+    def test_format_invalid_values_fail_before_scan(self) -> None:
+        for raw in ("", " ", " json", "json ", "JSON", "CSV", "Csv", "xml", "tsv"):
+            self.assertParseFailure(
+                f"错误: 选项 {FORMAT_OPTION} 的值必须是小写的 json 或 csv: "
+                f"{raw!r}",
+                str(self.root),
+                "target",
+                FORMAT_OPTION,
+                raw,
+            )
+
+    def test_format_value_equal_to_switch_does_not_enable_switch(self) -> None:
+        # 取值恰为开关记号时先按字面消费，随后报非法取值；开关不开启。
+        self.assertParseFailure(
+            f"错误: 选项 {FORMAT_OPTION} 的值必须是小写的 json 或 csv: "
+            f"{ALL_LINES_OPTION!r}",
+            str(self.root),
+            "target",
+            FORMAT_OPTION,
+            ALL_LINES_OPTION,
         )
 
     def test_unknown_token_and_option_before_keyword_position(self) -> None:

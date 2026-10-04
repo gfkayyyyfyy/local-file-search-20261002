@@ -9,6 +9,7 @@
                            [--and-keyword <附加关键词>]
                            [--not-keyword <排除关键词>]
                            [--limit <1-1000>]
+                           [--format <json|csv>]
 
 仅依赖 Python 3 标准库，离线运行，只读扫描源文件，不生成索引。
 """
@@ -31,8 +32,11 @@ FILE_TYPE_OPTION = "--file-type"
 AND_KEYWORD_OPTION = "--and-keyword"
 NOT_KEYWORD_OPTION = "--not-keyword"
 LIMIT_OPTION = "--limit"
+FORMAT_OPTION = "--format"
 MIN_LIMIT = 1
 MAX_LIMIT = 1000
+# --format 的合法小写字面量；缺省与 json 都输出原有 JSON，csv 输出表格文本。
+FORMAT_VALUES = ("json", "csv")
 # --file-type 的合法小写字面量到受支持扩展名（扩展名比较仍忽略大小写）。
 FILE_TYPE_SUFFIXES = {"txt": (".txt",), "md": (".md",)}
 USAGE = (
@@ -41,7 +45,7 @@ USAGE = (
     "[--ignore-case] [--all-lines] "
     "[--context-chars <0-200>] [--file-type <txt|md>] "
     "[--and-keyword <附加关键词>] [--not-keyword <排除关键词>] "
-    "[--limit <1-1000>]"
+    "[--limit <1-1000>] [--format <json|csv>]"
 )
 
 # 仅折叠 ASCII 的 A-Z 到 a-z；translate 按码点一一映射，不产生多字符展开
@@ -188,6 +192,20 @@ def _parse_limit(raw: str) -> int:
     return value
 
 
+def _parse_format(raw: str) -> str:
+    """解析 --format 的取值：仅接受小写字面值 ``json`` 或 ``csv``。
+
+    空值、纯空白、首尾带空白、大写（如 ``JSON``、``Csv``）以及其他取值
+    （如 ``xml``、``tsv``）一律拒绝；取值按字面消费，不做大小写折叠或
+    空白修剪，即使看起来像开关（如 ``--all-lines``）也仍作为格式值校验。
+    """
+    if raw not in FORMAT_VALUES:
+        raise ArgumentError(
+            f"错误: 选项 {FORMAT_OPTION} 的值必须是小写的 json 或 csv: {raw!r}"
+        )
+    return raw
+
+
 def _match_line(
     search_line: str,
     keyword: str,
@@ -285,6 +303,38 @@ def _search_file(
     return hits
 
 
+def _csv_field(value: str) -> str:
+    """按 RFC 4180 转义单个 CSV 字段。
+
+    字段含逗号、双引号或换行（``\\r``/``\\n``）时整体用双引号包围，内部
+    双引号写成两个双引号；其余字符（含中文、制表符等）保持原样。
+    """
+    if any(char in value for char in ',"\r\n'):
+        return '"' + value.replace('"', '""') + '"'
+    return value
+
+
+def _render_csv(results: list[dict]) -> bytes:
+    """把结果项序列化为不带 BOM 的 UTF-8 CSV 字节串。
+
+    表头固定为 ``path,line,snippet``，每个命中项一条记录，每条记录（含
+    表头）以 CRLF 结束；无命中时只输出表头及其 CRLF。列值沿用结果项中的
+    相对路径、行号与片段，不重新加工。
+    """
+    lines = ["path,line,snippet"]
+    for item in results:
+        lines.append(
+            ",".join(
+                (
+                    _csv_field(item["path"]),
+                    str(item["line"]),
+                    _csv_field(item["snippet"]),
+                )
+            )
+        )
+    return ("\r\n".join(lines) + "\r\n").encode("utf-8")
+
+
 class _OptionSpec:
     """一个命令行选项的解析规格，``name`` 即它在命令行中的完整记号。
 
@@ -307,7 +357,7 @@ class _OptionSpec:
         self.validate = validate
 
 
-# 九个选项共用同一套规则（至多出现一次；带值选项缺值即报错；取值按字面
+# 十个选项共用同一套规则（至多出现一次；带值选项缺值即报错；取值按字面
 # 消费），差异只在“是否带值”“缺省值”和“取值校验”三处，集中在本表声明。
 # 新增选项时只需在此追加一行，无需改动扫描循环。
 _OPTION_SPECS = (
@@ -335,6 +385,12 @@ _OPTION_SPECS = (
         default=None,
         validate=_parse_limit,
     ),
+    _OptionSpec(
+        FORMAT_OPTION,
+        takes_value=True,
+        default="json",
+        validate=_parse_format,
+    ),
 )
 _OPTION_BY_TOKEN = {spec.name: spec for spec in _OPTION_SPECS}
 
@@ -343,7 +399,7 @@ def _parse_args(
     args: list[str],
 ) -> tuple[
     str, str, str | None, str | None, bool, bool, int, str | None, str | None,
-    str | None, int | None,
+    str | None, int | None, str,
 ]:
     """解析参数：恰好两个位置参数，其后可出现选项。
 
@@ -351,7 +407,7 @@ def _parse_args(
     - ``--path-contains <片段>``：路径包含片段，取紧随选项的一个参数，该值
       即使看起来像选项（包括 ``--path-excludes``、``--ignore-case``、
       ``--all-lines``、``--context-chars``、``--file-type``、
-      ``--and-keyword``、``--not-keyword``、``--limit``）也仍是字面值；
+      ``--and-keyword``、``--not-keyword``、``--limit``、``--format``）也仍是字面值；
     - ``--path-excludes <片段>``：路径排除片段，语义与取值规则同
       ``--path-contains``；文件相对路径包含该片段即被排除，不读取其内容；
     - ``--ignore-case``：无取值的开关，可重复指定即报错；
@@ -376,6 +432,12 @@ def _parse_args(
       不开启该开关）；取值只接受非空的 ASCII 十进制数字串，允许前导零，
       范围 1 至 1000；缺省为 ``None``，表示不限制结果数量，缺值、重复
       指定或非法取值均报错。
+    - ``--format <json|csv>``：输出格式，取紧随选项的一个参数，该值同样
+      按字面消费（即使看起来像开关，如 ``--all-lines``，也作为格式值校验
+      而不开启该开关）；仅接受小写字面值 ``json`` 或 ``csv``；缺省为
+      ``json``，输出原有 JSON 数组，``csv`` 时输出表头为
+      ``path,line,snippet`` 的 CSV 文本；格式选择只影响序列化，不改变
+      检索、排序与 ``--limit`` 截断行为；缺值、重复指定或非法取值均报错。
 
     选项只允许出现在两个位置参数之后，相互先后顺序不限。不使用通用
     选项解析：两个位置参数按字面取值，因此以连字符开头的关键词（即使恰好
@@ -425,6 +487,7 @@ def _parse_args(
         values[AND_KEYWORD_OPTION],
         values[NOT_KEYWORD_OPTION],
         values[LIMIT_OPTION],
+        values[FORMAT_OPTION],
     )
 
 
@@ -444,6 +507,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             and_keyword,
             not_keyword,
             limit,
+            output_format,
         ) = _parse_args(args)
     except ArgumentError as exc:
         return _fail(str(exc))
@@ -506,7 +570,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if limit is not None:
         results = results[:limit]
 
-    payload = json.dumps(results, ensure_ascii=False)
-    sys.stdout.buffer.write(payload.encode("utf-8") + b"\n")
+    # 格式选择只影响序列化：检索、排序与截断在两种格式下完全一致。
+    if output_format == "csv":
+        payload = _render_csv(results)
+    else:
+        payload = json.dumps(results, ensure_ascii=False).encode("utf-8") + b"\n"
+    sys.stdout.buffer.write(payload)
     sys.stdout.buffer.flush()
     return 0

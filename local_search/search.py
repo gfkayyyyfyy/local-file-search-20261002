@@ -6,6 +6,7 @@
                            [--ignore-case] [--all-lines]
                            [--context-chars <0-200>]
                            [--file-type <txt|md>]
+                           [--and-keyword <附加关键词>]
 
 仅依赖 Python 3 标准库，离线运行，只读扫描源文件，不生成索引。
 """
@@ -25,13 +26,15 @@ IGNORE_CASE_OPTION = "--ignore-case"
 ALL_LINES_OPTION = "--all-lines"
 CONTEXT_CHARS_OPTION = "--context-chars"
 FILE_TYPE_OPTION = "--file-type"
+AND_KEYWORD_OPTION = "--and-keyword"
 # --file-type 的合法小写字面量到受支持扩展名（扩展名比较仍忽略大小写）。
 FILE_TYPE_SUFFIXES = {"txt": (".txt",), "md": (".md",)}
 USAGE = (
     "用法: python -m local_search <目录> <关键词> "
     "[--path-contains <路径片段>] [--path-excludes <路径片段>] "
     "[--ignore-case] [--all-lines] "
-    "[--context-chars <0-200>] [--file-type <txt|md>]"
+    "[--context-chars <0-200>] [--file-type <txt|md>] "
+    "[--and-keyword <附加关键词>]"
 )
 
 # 仅折叠 ASCII 的 A-Z 到 a-z；translate 按码点一一映射，不产生多字符展开
@@ -156,6 +159,7 @@ def _search_file(
     ignore_case: bool = False,
     all_lines: bool = False,
     context_chars: int = DEFAULT_CONTEXT_CHARS,
+    and_keyword: str | None = None,
 ) -> list[dict]:
     """在单个文件中查找单行命中，返回结果项列表（无命中返回空列表）。
 
@@ -167,25 +171,41 @@ def _search_file(
     比较（É 不匹配 é、ß 不匹配 ss）。匹配只用于定位，返回的片段始终取自
     源文本，保留原始大小写。
 
+    and_keyword 不为 None 时，只有同一行同时包含主关键词与该附加关键词才
+    算命中：两词各自按连续字面子串匹配，出现顺序不限，相同关键词或重叠
+    匹配可共用同一段文字；分处不同行的两个关键词不能合并为一行命中。
+    and_keyword 为 None 时行为与未提供该选项完全一致。
+
     all_lines 为假（默认）时只返回按行号、行内位置确定的首个命中；
     all_lines 为真时每个命中行各返回一项，按行号递增排列。同一行多次出现
-    关键词仍只产生一项，片段以该行最左侧命中为中心。
+    关键词仍只产生一项，片段以该行主关键词最左侧命中为中心。
 
     context_chars 为命中关键词前后各保留的码点数（按 Unicode 码点计，
     中文与补充平面字符各算一个；关键词自身长度不计入额度），到行首或行尾
     停止，不借用相邻行也不添加省略号。为 0 时片段只保留完整命中关键词。
+    片段只围绕主关键词定位，不为展示附加关键词而扩大。
     """
     with open(path, "r", encoding="utf-8") as handle:
         content = handle.read()
     folded_keyword = _ascii_lower(keyword) if ignore_case else keyword
+    folded_and_keyword = (
+        _ascii_lower(and_keyword)
+        if (and_keyword is not None and ignore_case)
+        else and_keyword
+    )
     hits: list[dict] = []
     for line_number, raw_line in enumerate(content.split("\n"), start=1):
         line = raw_line.rstrip("\r\n")
         if ignore_case:
-            position = _ascii_lower(line).find(folded_keyword)
+            folded_line = _ascii_lower(line)
+            position = folded_line.find(folded_keyword)
+            and_present = (
+                folded_and_keyword is None or folded_and_keyword in folded_line
+            )
         else:
             position = line.find(keyword)
-        if position == -1:
+            and_present = and_keyword is None or and_keyword in line
+        if position == -1 or not and_present:
             continue
         start = max(0, position - context_chars)
         end = min(len(line), position + len(keyword) + context_chars)
@@ -222,7 +242,7 @@ class _OptionSpec:
         self.validate = validate
 
 
-# 六个选项共用同一套规则（至多出现一次；带值选项缺值即报错；取值按字面
+# 七个选项共用同一套规则（至多出现一次；带值选项缺值即报错；取值按字面
 # 消费），差异只在“是否带值”“缺省值”和“取值校验”三处，集中在本表声明。
 # 新增选项时只需在此追加一行，无需改动扫描循环。
 _OPTION_SPECS = (
@@ -242,13 +262,14 @@ _OPTION_SPECS = (
         default=None,
         validate=_parse_file_type,
     ),
+    _OptionSpec(AND_KEYWORD_OPTION, takes_value=True, default=None),
 )
 _OPTION_BY_TOKEN = {spec.name: spec for spec in _OPTION_SPECS}
 
 
 def _parse_args(
     args: list[str],
-) -> tuple[str, str, str | None, str | None, bool, bool, int, str | None]:
+) -> tuple[str, str, str | None, str | None, bool, bool, int, str | None, str | None]:
     """解析参数：恰好两个位置参数，其后可出现选项。
 
     支持的选项：
@@ -266,6 +287,11 @@ def _parse_args(
       该值同样按字面消费（即使看起来像开关也不开启该开关），仅接受小写
       字面值 ``txt`` 或 ``md``；缺省为 ``None``，表示同时检索两种格式，
       缺值、重复指定或非法取值均报错。
+    - ``--and-keyword <附加关键词>``：要求同一行同时包含主关键词与该附加
+      关键词才算命中，取紧随选项的一个参数，该值同样按字面消费（即使
+      看起来像开关也仍是字面文本，不开启任何开关）；缺省为 ``None``，
+      表示不做双关键词筛选，缺值或重复指定均报错，值为空或全为空白在
+      扫描前报错。
 
     选项只允许出现在两个位置参数之后，相互先后顺序不限。不使用通用
     选项解析：两个位置参数按字面取值，因此以连字符开头的关键词（即使恰好
@@ -312,6 +338,7 @@ def _parse_args(
         ALL_LINES_OPTION in seen,
         values[CONTEXT_CHARS_OPTION],
         values[FILE_TYPE_OPTION],
+        values[AND_KEYWORD_OPTION],
     )
 
 
@@ -328,12 +355,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             all_lines,
             context_chars,
             file_type,
+            and_keyword,
         ) = _parse_args(args)
     except ArgumentError as exc:
         return _fail(str(exc))
 
     if not keyword or not keyword.strip():
         return _fail("错误: 关键词为空或全为空白")
+    if and_keyword is not None and not and_keyword.strip():
+        return _fail(f"错误: {AND_KEYWORD_OPTION} 的附加关键词为空或全为空白")
     if path_contains is not None and not path_contains.strip():
         return _fail(f"错误: {PATH_OPTION} 的路径片段为空或全为空白")
     if path_excludes is not None and not path_excludes.strip():
@@ -364,7 +394,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if path_excludes is not None and path_excludes in rel:
             continue
         try:
-            hits = _search_file(path, keyword, ignore_case, all_lines, context_chars)
+            hits = _search_file(
+                path, keyword, ignore_case, all_lines, context_chars, and_keyword
+            )
         except UnicodeDecodeError as exc:
             _emit_stderr(f"警告: 跳过文件 {rel}: 无法按 UTF-8 解码 ({exc})")
             continue

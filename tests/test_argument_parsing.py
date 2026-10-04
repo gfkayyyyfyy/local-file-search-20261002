@@ -1,6 +1,6 @@
 """参数解析流程的端到端回归测试（重构后集中验证共用规则）。
 
-``local_search.search`` 中六个选项的“去重 / 缺值 / 取值校验”改由统一的
+``local_search.search`` 中七个选项的“去重 / 缺值 / 取值校验”改由统一的
 规格表扫描循环完成后，本文件固定其对外可观察行为，防止重构改变：
 
 - 前两个参数按字面解释：即使关键词恰为 ``--all-lines``、``--file-type``
@@ -9,7 +9,7 @@
 - 带值选项的值始终按字面消费：``--path-contains --ignore-case`` 中的
   ``--ignore-case`` 是路径片段而非开关，``--context-chars``、
   ``--file-type`` 的值看似开关时也先被取值、再按各自格式报错；
-- 六个选项各自重复指定都报“只能指定一次”，四个带值选项缺紧随参数都报
+- 七个选项各自重复指定都报“只能指定一次”，五个带值选项缺紧随参数都报
   “缺少值”，无法识别的记号报“无法识别的参数”，且一律报告扫描到的第一个
   错误（多个错误并存时保持既有优先级）；
 - ``--context-chars`` 只接受非空 ASCII 十进制数字串、允许任意数量前导零、
@@ -43,11 +43,13 @@ IGNORE_CASE_OPTION = "--ignore-case"
 ALL_LINES_OPTION = "--all-lines"
 CONTEXT_CHARS_OPTION = "--context-chars"
 FILE_TYPE_OPTION = "--file-type"
+AND_KEYWORD_OPTION = "--and-keyword"
 USAGE_LINE = (
     "用法: python -m local_search <目录> <关键词> "
     "[--path-contains <路径片段>] [--path-excludes <路径片段>] "
     "[--ignore-case] [--all-lines] "
-    "[--context-chars <0-200>] [--file-type <txt|md>]"
+    "[--context-chars <0-200>] [--file-type <txt|md>] "
+    "[--and-keyword <附加关键词>]"
 )
 
 
@@ -70,7 +72,7 @@ class ParseArgsUnitTest(unittest.TestCase):
     def test_defaults_when_no_options(self) -> None:
         self.assertEqual(
             _parse_args(["some-dir", "target"]),
-            ("some-dir", "target", None, None, False, False, 30, None),
+            ("some-dir", "target", None, None, False, False, 30, None, None),
         )
 
     def test_all_options_parsed_in_declared_tuple_order(self) -> None:
@@ -88,25 +90,27 @@ class ParseArgsUnitTest(unittest.TestCase):
                 "0",
                 FILE_TYPE_OPTION,
                 "txt",
+                AND_KEYWORD_OPTION,
+                "budget",
             ]
         )
         self.assertEqual(
             parsed,
-            ("some-dir", "TARGET", "notes/", "private/", True, True, 0, "txt"),
+            ("some-dir", "TARGET", "notes/", "private/", True, True, 0, "txt", "budget"),
         )
 
     def test_option_token_as_keyword_stays_literal(self) -> None:
         # 关键词恰为开关记号时，后面的位置才进入选项扫描。
         self.assertEqual(
             _parse_args(["some-dir", ALL_LINES_OPTION, IGNORE_CASE_OPTION]),
-            ("some-dir", ALL_LINES_OPTION, None, None, True, False, 30, None),
+            ("some-dir", ALL_LINES_OPTION, None, None, True, False, 30, None, None),
         )
 
     def test_option_token_as_file_type_keyword_stays_literal(self) -> None:
         # 关键词恰为 --file-type 时仍是字面文本，后面的参数才进入选项扫描。
         self.assertEqual(
             _parse_args(["some-dir", FILE_TYPE_OPTION, IGNORE_CASE_OPTION]),
-            ("some-dir", FILE_TYPE_OPTION, None, None, True, False, 30, None),
+            ("some-dir", FILE_TYPE_OPTION, None, None, True, False, 30, None, None),
         )
 
     def test_option_token_as_value_stays_literal(self) -> None:
@@ -140,6 +144,7 @@ class ParseArgsUnitTest(unittest.TestCase):
             [PATH_OPTION, "a", PATH_OPTION, "b"],
             [EXCLUDES_OPTION, "a", EXCLUDES_OPTION, "b"],
             [FILE_TYPE_OPTION, "txt", FILE_TYPE_OPTION, "md"],
+            [AND_KEYWORD_OPTION, "a", AND_KEYWORD_OPTION, "b"],
         )
         for tail in cases:
             name = tail[0]
@@ -151,7 +156,13 @@ class ParseArgsUnitTest(unittest.TestCase):
                 )
 
     def test_missing_value_raises_for_value_options(self) -> None:
-        for name in (PATH_OPTION, EXCLUDES_OPTION, CONTEXT_CHARS_OPTION, FILE_TYPE_OPTION):
+        for name in (
+            PATH_OPTION,
+            EXCLUDES_OPTION,
+            CONTEXT_CHARS_OPTION,
+            FILE_TYPE_OPTION,
+            AND_KEYWORD_OPTION,
+        ):
             with self.subTest(name=name):
                 with self.assertRaises(ArgumentError) as caught:
                     _parse_args(["d", "k", name])
@@ -359,6 +370,7 @@ class ArgumentParsingCliTest(unittest.TestCase):
             PATH_OPTION: (PATH_OPTION, "a", PATH_OPTION, "b"),
             EXCLUDES_OPTION: (EXCLUDES_OPTION, "a", EXCLUDES_OPTION, "b"),
             FILE_TYPE_OPTION: (FILE_TYPE_OPTION, "txt", FILE_TYPE_OPTION, "md"),
+            AND_KEYWORD_OPTION: (AND_KEYWORD_OPTION, "a", AND_KEYWORD_OPTION, "b"),
         }
         for name, tail in cases.items():
             self.assertParseFailure(
@@ -369,7 +381,13 @@ class ArgumentParsingCliTest(unittest.TestCase):
             )
 
     def test_missing_values_fail_before_scan(self) -> None:
-        for name in (PATH_OPTION, EXCLUDES_OPTION, CONTEXT_CHARS_OPTION, FILE_TYPE_OPTION):
+        for name in (
+            PATH_OPTION,
+            EXCLUDES_OPTION,
+            CONTEXT_CHARS_OPTION,
+            FILE_TYPE_OPTION,
+            AND_KEYWORD_OPTION,
+        ):
             self.assertParseFailure(
                 f"错误: 选项 {name} 缺少值",
                 str(self.root),

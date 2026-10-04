@@ -9,6 +9,7 @@
                            [--and-keyword <附加关键词>]
                            [--not-keyword <排除关键词>]
                            [--limit <1-1000>]
+                           [--offset <0-1000>]
                            [--format <json|csv>]
 
 仅依赖 Python 3 标准库，离线运行，只读扫描源文件，不生成索引。
@@ -32,9 +33,12 @@ FILE_TYPE_OPTION = "--file-type"
 AND_KEYWORD_OPTION = "--and-keyword"
 NOT_KEYWORD_OPTION = "--not-keyword"
 LIMIT_OPTION = "--limit"
+OFFSET_OPTION = "--offset"
 FORMAT_OPTION = "--format"
 MIN_LIMIT = 1
 MAX_LIMIT = 1000
+MIN_OFFSET = 0
+MAX_OFFSET = 1000
 # --format 的合法小写字面量；缺省与 json 都输出原有 JSON，csv 输出表格文本。
 FORMAT_VALUES = ("json", "csv")
 # --file-type 的合法小写字面量到受支持扩展名（扩展名比较仍忽略大小写）。
@@ -45,7 +49,7 @@ USAGE = (
     "[--ignore-case] [--all-lines] "
     "[--context-chars <0-200>] [--file-type <txt|md>] "
     "[--and-keyword <附加关键词>] [--not-keyword <排除关键词>] "
-    "[--limit <1-1000>] [--format <json|csv>]"
+    "[--limit <1-1000>] [--offset <0-1000>] [--format <json|csv>]"
 )
 
 # 仅折叠 ASCII 的 A-Z 到 a-z；translate 按码点一一映射，不产生多字符展开
@@ -189,6 +193,17 @@ def _parse_limit(raw: str) -> int:
     形式）不在范围内，按超范围处理。
     """
     return _parse_decimal_in_range(raw, LIMIT_OPTION, MIN_LIMIT, MAX_LIMIT)
+
+
+def _parse_offset(raw: str) -> int:
+    """解析 --offset 的取值：非空 ASCII 十进制数字串，0 到 1000。
+
+    格式规则与 :func:`_parse_limit` 完全一致，统一由
+    :func:`_parse_decimal_in_range` 维护；本选项区间为
+    :data:`MIN_OFFSET` 至 :data:`MAX_OFFSET`，``0``（含 ``000`` 等前导零
+    形式）在范围内，按 0 接受。
+    """
+    return _parse_decimal_in_range(raw, OFFSET_OPTION, MIN_OFFSET, MAX_OFFSET)
 
 
 def _parse_format(raw: str) -> str:
@@ -356,7 +371,7 @@ class _OptionSpec:
         self.validate = validate
 
 
-# 十个选项共用同一套规则（至多出现一次；带值选项缺值即报错；取值按字面
+# 十一个选项共用同一套规则（至多出现一次；带值选项缺值即报错；取值按字面
 # 消费），差异只在“是否带值”“缺省值”和“取值校验”三处，集中在本表声明。
 # 新增选项时只需在此追加一行，无需改动扫描循环。
 _OPTION_SPECS = (
@@ -385,6 +400,12 @@ _OPTION_SPECS = (
         validate=_parse_limit,
     ),
     _OptionSpec(
+        OFFSET_OPTION,
+        takes_value=True,
+        default=0,
+        validate=_parse_offset,
+    ),
+    _OptionSpec(
         FORMAT_OPTION,
         takes_value=True,
         default="json",
@@ -398,7 +419,7 @@ def _parse_args(
     args: list[str],
 ) -> tuple[
     str, str, str | None, str | None, bool, bool, int, str | None, str | None,
-    str | None, int | None, str,
+    str | None, int | None, int, str,
 ]:
     """解析参数：恰好两个位置参数，其后可出现选项。
 
@@ -406,7 +427,8 @@ def _parse_args(
     - ``--path-contains <片段>``：路径包含片段，取紧随选项的一个参数，该值
       即使看起来像选项（包括 ``--path-excludes``、``--ignore-case``、
       ``--all-lines``、``--context-chars``、``--file-type``、
-      ``--and-keyword``、``--not-keyword``、``--limit``、``--format``）也仍是字面值；
+      ``--and-keyword``、``--not-keyword``、``--limit``、``--offset``、
+      ``--format``）也仍是字面值；
     - ``--path-excludes <片段>``：路径排除片段，语义与取值规则同
       ``--path-contains``；文件相对路径包含该片段即被排除，不读取其内容；
     - ``--ignore-case``：无取值的开关，可重复指定即报错；
@@ -430,6 +452,11 @@ def _parse_args(
       按字面消费（即使看起来像开关，如 ``--all-lines``，也作为取值校验而
       不开启该开关）；取值只接受非空的 ASCII 十进制数字串，允许前导零，
       范围 1 至 1000；缺省为 ``None``，表示不限制结果数量，缺值、重复
+      指定或非法取值均报错。
+    - ``--offset <0-1000>``：结果起始偏移，取紧随选项的一个参数，该值同样
+      按字面消费（即使看起来像开关，如 ``--all-lines``，也作为取值校验而
+      不开启该开关）；取值只接受非空的 ASCII 十进制数字串，允许前导零，
+      范围 0 至 1000；缺省为 ``0``，表示不跳过任何结果项，缺值、重复
       指定或非法取值均报错。
     - ``--format <json|csv>``：输出格式，取紧随选项的一个参数，该值同样
       按字面消费（即使看起来像开关，如 ``--all-lines``，也作为格式值校验
@@ -486,6 +513,7 @@ def _parse_args(
         values[AND_KEYWORD_OPTION],
         values[NOT_KEYWORD_OPTION],
         values[LIMIT_OPTION],
+        values[OFFSET_OPTION],
         values[FORMAT_OPTION],
     )
 
@@ -506,6 +534,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             and_keyword,
             not_keyword,
             limit,
+            offset,
             output_format,
         ) = _parse_args(args)
     except ArgumentError as exc:
@@ -563,9 +592,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     # 先按路径的区分大小写 Unicode 码点序，同一路径再按行号递增。
     results.sort(key=lambda item: (item["path"], item["line"]))
 
-    # --limit 在完整排序之后截取前 N 项：截断依据是排序后的结果序列而非目录
-    # 扫描顺序。扫描与告警不受上限影响——即使结果已足够，候选坏文件的既有
-    # 告警仍照常产生，因此截断只在全部文件处理完、排序后进行。
+    # --offset 与 --limit 在完整排序之后依次截取：先跳过排序后结果序列的前
+    # N 项，再对剩余项应用数量上限。截断依据是排序后的结果序列而非目录扫描
+    # 顺序。扫描与告警不受偏移或上限影响——即使结果被全部跳过或已足够，候选
+    # 坏文件的既有告警仍照常产生，因此截取只在全部文件处理完、排序后进行。
+    # 偏移等于或大于合格项总数时剩余为空，与无命中一样输出空结果。
+    if offset:
+        results = results[offset:]
     if limit is not None:
         results = results[:limit]
 

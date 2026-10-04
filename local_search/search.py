@@ -153,6 +153,52 @@ def _parse_file_type(raw: str) -> str:
     return raw
 
 
+def _fold_text(text: str, ignore_case: bool) -> str:
+    """按当前大小写策略得到用于比较的文本。
+
+    ignore_case 为真时只折叠 ASCII 的 A-Z 到 a-z（逐码点映射，长度不变，
+    不产生 ß→ss 之类的多字符展开）；为假时原样返回。调用方对关键词、
+    附加关键词与每一行统一使用本函数，区分大小写与忽略大小写两条路径
+    因此共用同一套命中判定。
+    """
+    return _ascii_lower(text) if ignore_case else text
+
+
+def _match_position(
+    folded_line: str,
+    folded_keyword: str,
+    folded_and_keyword: str | None,
+) -> int:
+    """在已按大小写策略折叠好的一行中定位主关键词的最左命中。
+
+    返回主关键词在该行的起始位置；主关键词不存在，或给出了附加关键词
+    而该行不包含它（分处不同行不能合并）时返回 -1。附加关键词只负责
+    同行筛选，其位置不影响主关键词最左命中的选取，重叠或相同匹配可以
+    与主关键词共用文字。所有比较都是连续字面子串比较，不解释正则或
+    通配符，也不跨行。
+    """
+    position = folded_line.find(folded_keyword)
+    if position == -1:
+        return -1
+    if folded_and_keyword is not None and folded_line.find(folded_and_keyword) == -1:
+        return -1
+    return position
+
+
+def _build_snippet(
+    line: str, position: int, keyword_length: int, context_chars: int
+) -> str:
+    """围绕主关键词命中从源行截取片段。
+
+    始终取自源文本（折叠只用于定位），保留原始大小写；前后各保留
+    context_chars 个 Unicode 码点（中文与补充平面字符各算一个，关键词
+    自身长度不计入额度），到行首或行尾停止，不添加换行或省略号。
+    """
+    start = max(0, position - context_chars)
+    end = min(len(line), position + keyword_length + context_chars)
+    return line[start:end]
+
+
 def _search_file(
     path: str,
     keyword: str,
@@ -168,8 +214,10 @@ def _search_file(
     由调用方跳过该文件并告警，不会返回该文件的任何命中。
 
     ignore_case 为真时，仅把 ASCII 的 A-Z/a-z 视为同一字符；其他字符仍精确
-    比较（É 不匹配 é、ß 不匹配 ss）。匹配只用于定位，返回的片段始终取自
-    源文本，保留原始大小写。
+    比较（É 不匹配 é、ß 不匹配 ss）。关键词、附加关键词与每一行先经
+    :func:`_fold_text` 统一折叠（区分大小写时折叠即原文），随后两条路径
+    共用 :func:`_match_position` 完成命中判定。匹配只用于定位，返回的片段
+    始终取自源文本，保留原始大小写。
 
     and_keyword 不为 None 时，同一行还须包含该附加关键词才算命中：两词均按
     连续字面子串匹配（不拆词、不解释正则或通配符，首尾空格保留），必须分别
@@ -187,34 +235,27 @@ def _search_file(
     """
     with open(path, "r", encoding="utf-8") as handle:
         content = handle.read()
-    folded_keyword = _ascii_lower(keyword) if ignore_case else keyword
+
+    folded_keyword = _fold_text(keyword, ignore_case)
     folded_and_keyword = (
-        _ascii_lower(and_keyword) if ignore_case and and_keyword is not None else and_keyword
+        _fold_text(and_keyword, ignore_case) if and_keyword is not None else None
     )
+
     hits: list[dict] = []
     for line_number, raw_line in enumerate(content.split("\n"), start=1):
         line = raw_line.rstrip("\r\n")
-        if ignore_case:
-            folded_line = _ascii_lower(line)
-            position = folded_line.find(folded_keyword)
-            and_position = (
-                folded_line.find(folded_and_keyword)
-                if folded_and_keyword is not None
-                else 0
-            )
-        else:
-            position = line.find(keyword)
-            and_position = (
-                line.find(and_keyword) if and_keyword is not None else 0
-            )
-        if position == -1 or and_position == -1:
+        # 折叠按码点一一映射、长度不变，因此折叠文本上的命中位置与片段
+        # 边界可直接用于源文本；片段仍从源行切出以保留原始大小写。
+        folded_line = _fold_text(line, ignore_case)
+        position = _match_position(folded_line, folded_keyword, folded_and_keyword)
+        if position == -1:
             continue
-        start = max(0, position - context_chars)
-        end = min(len(line), position + len(keyword) + context_chars)
         hits.append(
             {
                 "line": line_number,
-                "snippet": line[start:end],
+                "snippet": _build_snippet(
+                    line, position, len(keyword), context_chars
+                ),
             }
         )
         if not all_lines:

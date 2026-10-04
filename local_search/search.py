@@ -153,6 +153,24 @@ def _parse_file_type(raw: str) -> str:
     return raw
 
 
+def _match_line(search_line: str, keyword: str, and_keyword: str | None) -> int:
+    """在单行检索视图中做命中判定，返回主关键词最左侧命中的位置，未命中返回 -1。
+
+    ``search_line`` 是已经按需折叠大小写的行文本，``keyword`` 与
+    ``and_keyword`` 是与之对应的关键词形式；区分大小写与忽略大小写两个分支
+    只在进入本函数前如何构造这些文本上不同，判定逻辑完全一致。
+
+    and_keyword 不为 None 时，同一行还须包含该附加关键词（位置不限，可与主
+    关键词的命中重叠或共用文字），否则同样按未命中处理。
+    """
+    position = search_line.find(keyword)
+    if position == -1:
+        return -1
+    if and_keyword is not None and and_keyword not in search_line:
+        return -1
+    return position
+
+
 def _search_file(
     path: str,
     keyword: str,
@@ -194,20 +212,11 @@ def _search_file(
     hits: list[dict] = []
     for line_number, raw_line in enumerate(content.split("\n"), start=1):
         line = raw_line.rstrip("\r\n")
-        if ignore_case:
-            folded_line = _ascii_lower(line)
-            position = folded_line.find(folded_keyword)
-            and_position = (
-                folded_line.find(folded_and_keyword)
-                if folded_and_keyword is not None
-                else 0
-            )
-        else:
-            position = line.find(keyword)
-            and_position = (
-                line.find(and_keyword) if and_keyword is not None else 0
-            )
-        if position == -1 or and_position == -1:
+        # 命中判定统一在“检索视图”上进行：忽略大小写时为 ASCII 折叠后的行，
+        # 否则为原行；两种模式共用 _match_line 的同一套判定。
+        search_line = _ascii_lower(line) if ignore_case else line
+        position = _match_line(search_line, folded_keyword, folded_and_keyword)
+        if position == -1:
             continue
         start = max(0, position - context_chars)
         end = min(len(line), position + len(keyword) + context_chars)

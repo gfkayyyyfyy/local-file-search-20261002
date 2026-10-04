@@ -8,6 +8,7 @@
                            [--file-type <txt|md>]
                            [--and-keyword <附加关键词>]
                            [--not-keyword <排除关键词>]
+                           [--limit <1-1000>]
 
 仅依赖 Python 3 标准库，离线运行，只读扫描源文件，不生成索引。
 """
@@ -29,6 +30,9 @@ CONTEXT_CHARS_OPTION = "--context-chars"
 FILE_TYPE_OPTION = "--file-type"
 AND_KEYWORD_OPTION = "--and-keyword"
 NOT_KEYWORD_OPTION = "--not-keyword"
+LIMIT_OPTION = "--limit"
+MIN_LIMIT = 1
+MAX_LIMIT = 1000
 # --file-type 的合法小写字面量到受支持扩展名（扩展名比较仍忽略大小写）。
 FILE_TYPE_SUFFIXES = {"txt": (".txt",), "md": (".md",)}
 USAGE = (
@@ -36,7 +40,8 @@ USAGE = (
     "[--path-contains <路径片段>] [--path-excludes <路径片段>] "
     "[--ignore-case] [--all-lines] "
     "[--context-chars <0-200>] [--file-type <txt|md>] "
-    "[--and-keyword <附加关键词>] [--not-keyword <排除关键词>]"
+    "[--and-keyword <附加关键词>] [--not-keyword <排除关键词>] "
+    "[--limit <1-1000>]"
 )
 
 # 仅折叠 ASCII 的 A-Z 到 a-z；translate 按码点一一映射，不产生多字符展开
@@ -153,6 +158,34 @@ def _parse_file_type(raw: str) -> str:
             f"错误: 选项 {FILE_TYPE_OPTION} 的值必须是小写的 txt 或 md: {raw!r}"
         )
     return raw
+
+
+def _parse_limit(raw: str) -> int:
+    """解析 --limit 的取值：非空 ASCII 十进制数字串，1 到 1000。
+
+    允许前导零（如 ``007`` 即 7），前导零的数量不影响数值，也不设字符串
+    长度上限；首尾空白、正负号、小数点、非 ASCII 数字（如全角数字）一律
+    拒绝。``0``（含 ``000`` 等前导零形式）不在 1-1000 范围内，按超范围
+    处理。
+
+    与 :func:`_parse_context_chars` 同理，先剔除不影响数值的前导零再判断
+    位数，避免把超长数字串直接传给 ``int()`` 触发整数长度限制。
+    """
+    if not raw or not raw.isascii() or not raw.isdecimal():
+        raise ArgumentError(
+            f"错误: 选项 {LIMIT_OPTION} 的值必须是非空的 ASCII 十进制数字串: {raw!r}"
+        )
+    digits = raw.lstrip("0")
+    if len(digits) > 4:
+        raise ArgumentError(
+            f"错误: 选项 {LIMIT_OPTION} 的值超出范围 {MIN_LIMIT}-{MAX_LIMIT}: {raw!r}"
+        )
+    value = int(digits) if digits else 0
+    if value < MIN_LIMIT or value > MAX_LIMIT:
+        raise ArgumentError(
+            f"错误: 选项 {LIMIT_OPTION} 的值超出范围 {MIN_LIMIT}-{MAX_LIMIT}: {raw!r}"
+        )
+    return value
 
 
 def _match_line(
@@ -274,7 +307,7 @@ class _OptionSpec:
         self.validate = validate
 
 
-# 八个选项共用同一套规则（至多出现一次；带值选项缺值即报错；取值按字面
+# 九个选项共用同一套规则（至多出现一次；带值选项缺值即报错；取值按字面
 # 消费），差异只在“是否带值”“缺省值”和“取值校验”三处，集中在本表声明。
 # 新增选项时只需在此追加一行，无需改动扫描循环。
 _OPTION_SPECS = (
@@ -296,20 +329,29 @@ _OPTION_SPECS = (
     ),
     _OptionSpec(AND_KEYWORD_OPTION, takes_value=True, default=None),
     _OptionSpec(NOT_KEYWORD_OPTION, takes_value=True, default=None),
+    _OptionSpec(
+        LIMIT_OPTION,
+        takes_value=True,
+        default=None,
+        validate=_parse_limit,
+    ),
 )
 _OPTION_BY_TOKEN = {spec.name: spec for spec in _OPTION_SPECS}
 
 
 def _parse_args(
     args: list[str],
-) -> tuple[str, str, str | None, str | None, bool, bool, int, str | None, str | None, str | None]:
+) -> tuple[
+    str, str, str | None, str | None, bool, bool, int, str | None, str | None,
+    str | None, int | None,
+]:
     """解析参数：恰好两个位置参数，其后可出现选项。
 
     支持的选项：
     - ``--path-contains <片段>``：路径包含片段，取紧随选项的一个参数，该值
       即使看起来像选项（包括 ``--path-excludes``、``--ignore-case``、
       ``--all-lines``、``--context-chars``、``--file-type``、
-      ``--and-keyword``、``--not-keyword``）也仍是字面值；
+      ``--and-keyword``、``--not-keyword``、``--limit``）也仍是字面值；
     - ``--path-excludes <片段>``：路径排除片段，语义与取值规则同
       ``--path-contains``；文件相对路径包含该片段即被排除，不读取其内容；
     - ``--ignore-case``：无取值的开关，可重复指定即报错；
@@ -329,6 +371,11 @@ def _parse_args(
       才算命中，取紧随选项的一个参数，该值同样按字面消费（即使看起来像
       开关，如 ``--all-lines``，也按文本处理而不开启该开关）；缺省为
       ``None``，表示不做排除词筛选，缺值或重复指定均报错。
+    - ``--limit <1-1000>``：结果数量上限，取紧随选项的一个参数，该值同样
+      按字面消费（即使看起来像开关，如 ``--all-lines``，也作为取值校验而
+      不开启该开关）；取值只接受非空的 ASCII 十进制数字串，允许前导零，
+      范围 1 至 1000；缺省为 ``None``，表示不限制结果数量，缺值、重复
+      指定或非法取值均报错。
 
     选项只允许出现在两个位置参数之后，相互先后顺序不限。不使用通用
     选项解析：两个位置参数按字面取值，因此以连字符开头的关键词（即使恰好
@@ -377,6 +424,7 @@ def _parse_args(
         values[FILE_TYPE_OPTION],
         values[AND_KEYWORD_OPTION],
         values[NOT_KEYWORD_OPTION],
+        values[LIMIT_OPTION],
     )
 
 
@@ -395,6 +443,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             file_type,
             and_keyword,
             not_keyword,
+            limit,
         ) = _parse_args(args)
     except ArgumentError as exc:
         return _fail(str(exc))
@@ -450,6 +499,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # 先按路径的区分大小写 Unicode 码点序，同一路径再按行号递增。
     results.sort(key=lambda item: (item["path"], item["line"]))
+
+    # --limit 在完整排序之后截取前 N 项：截断依据是排序后的结果序列而非目录
+    # 扫描顺序。扫描与告警不受上限影响——即使结果已足够，候选坏文件的既有
+    # 告警仍照常产生，因此截断只在全部文件处理完、排序后进行。
+    if limit is not None:
+        results = results[:limit]
 
     payload = json.dumps(results, ensure_ascii=False)
     sys.stdout.buffer.write(payload.encode("utf-8") + b"\n")

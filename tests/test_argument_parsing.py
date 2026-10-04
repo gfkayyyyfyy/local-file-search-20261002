@@ -1,6 +1,6 @@
 """参数解析流程的端到端回归测试（重构后集中验证共用规则）。
 
-``local_search.search`` 中八个选项的“去重 / 缺值 / 取值校验”改由统一的
+``local_search.search`` 中九个选项的“去重 / 缺值 / 取值校验”改由统一的
 规格表扫描循环完成后，本文件固定其对外可观察行为，防止重构改变：
 
 - 前两个参数按字面解释：即使关键词恰为 ``--all-lines``、``--file-type``
@@ -9,11 +9,13 @@
 - 带值选项的值始终按字面消费：``--path-contains --ignore-case`` 中的
   ``--ignore-case`` 是路径片段而非开关，``--context-chars``、
   ``--file-type`` 的值看似开关时也先被取值、再按各自格式报错；
-- 八个选项各自重复指定都报“只能指定一次”，六个带值选项缺紧随参数都报
+- 九个选项各自重复指定都报“只能指定一次”，七个带值选项缺紧随参数都报
   “缺少值”，无法识别的记号报“无法识别的参数”，且一律报告扫描到的第一个
   错误（多个错误并存时保持既有优先级）；
 - ``--context-chars`` 只接受非空 ASCII 十进制数字串、允许任意数量前导零、
   范围 0-200；空白、正负号、小数、非 ASCII 数字、超范围均拒绝；
+- ``--limit`` 只接受非空 ASCII 十进制数字串、允许任意数量前导零、
+  范围 1-1000；空白、正负号、小数、非 ASCII 数字、0 及超范围均拒绝；
 - ``--file-type`` 只接受小写字面值 ``txt`` 或 ``md``；空值、纯空白、
   首尾空白、大写值及其他格式均拒绝；
 - 缺位置参数报用法，关键词或路径片段为空 / 全空白报对应文案；以上错误均在
@@ -45,12 +47,14 @@ CONTEXT_CHARS_OPTION = "--context-chars"
 FILE_TYPE_OPTION = "--file-type"
 AND_KEYWORD_OPTION = "--and-keyword"
 NOT_KEYWORD_OPTION = "--not-keyword"
+LIMIT_OPTION = "--limit"
 USAGE_LINE = (
     "用法: python -m local_search <目录> <关键词> "
     "[--path-contains <路径片段>] [--path-excludes <路径片段>] "
     "[--ignore-case] [--all-lines] "
     "[--context-chars <0-200>] [--file-type <txt|md>] "
-    "[--and-keyword <附加关键词>] [--not-keyword <排除关键词>]"
+    "[--and-keyword <附加关键词>] [--not-keyword <排除关键词>] "
+    "[--limit <1-1000>]"
 )
 
 
@@ -73,7 +77,7 @@ class ParseArgsUnitTest(unittest.TestCase):
     def test_defaults_when_no_options(self) -> None:
         self.assertEqual(
             _parse_args(["some-dir", "target"]),
-            ("some-dir", "target", None, None, False, False, 30, None, None, None),
+            ("some-dir", "target", None, None, False, False, 30, None, None, None, None),
         )
 
     def test_all_options_parsed_in_declared_tuple_order(self) -> None:
@@ -95,26 +99,28 @@ class ParseArgsUnitTest(unittest.TestCase):
                 "budget",
                 NOT_KEYWORD_OPTION,
                 "draft",
+                LIMIT_OPTION,
+                "2",
             ]
         )
         self.assertEqual(
             parsed,
             ("some-dir", "TARGET", "notes/", "private/", True, True, 0, "txt",
-             "budget", "draft"),
+             "budget", "draft", 2),
         )
 
     def test_option_token_as_keyword_stays_literal(self) -> None:
         # 关键词恰为开关记号时，后面的位置才进入选项扫描。
         self.assertEqual(
             _parse_args(["some-dir", ALL_LINES_OPTION, IGNORE_CASE_OPTION]),
-            ("some-dir", ALL_LINES_OPTION, None, None, True, False, 30, None, None, None),
+            ("some-dir", ALL_LINES_OPTION, None, None, True, False, 30, None, None, None, None),
         )
 
     def test_option_token_as_file_type_keyword_stays_literal(self) -> None:
         # 关键词恰为 --file-type 时仍是字面文本，后面的参数才进入选项扫描。
         self.assertEqual(
             _parse_args(["some-dir", FILE_TYPE_OPTION, IGNORE_CASE_OPTION]),
-            ("some-dir", FILE_TYPE_OPTION, None, None, True, False, 30, None, None, None),
+            ("some-dir", FILE_TYPE_OPTION, None, None, True, False, 30, None, None, None, None),
         )
 
     def test_option_token_as_value_stays_literal(self) -> None:
@@ -150,6 +156,7 @@ class ParseArgsUnitTest(unittest.TestCase):
             [FILE_TYPE_OPTION, "txt", FILE_TYPE_OPTION, "md"],
             [AND_KEYWORD_OPTION, "a", AND_KEYWORD_OPTION, "b"],
             [NOT_KEYWORD_OPTION, "a", NOT_KEYWORD_OPTION, "b"],
+            [LIMIT_OPTION, "1", LIMIT_OPTION, "2"],
         )
         for tail in cases:
             name = tail[0]
@@ -168,6 +175,7 @@ class ParseArgsUnitTest(unittest.TestCase):
             FILE_TYPE_OPTION,
             AND_KEYWORD_OPTION,
             NOT_KEYWORD_OPTION,
+            LIMIT_OPTION,
         ):
             with self.subTest(name=name):
                 with self.assertRaises(ArgumentError) as caught:
@@ -245,6 +253,43 @@ class ParseArgsUnitTest(unittest.TestCase):
                     f"错误: 选项 {CONTEXT_CHARS_OPTION} 的值超出范围 0-200: "
                     f"{raw!r}",
                 )
+
+    def test_limit_format_and_range_messages(self) -> None:
+        bad_format = ("", " 3", "3 ", "+1", "-1", "2.5", "１２", "3a")
+        for raw in bad_format:
+            with self.subTest(raw=raw):
+                with self.assertRaises(ArgumentError) as caught:
+                    _parse_args(["d", "k", LIMIT_OPTION, raw])
+                self.assertEqual(
+                    str(caught.exception),
+                    f"错误: 选项 {LIMIT_OPTION} 的值必须是非空的 "
+                    f"ASCII 十进制数字串: {raw!r}",
+                )
+        for raw in ("0", "000", "1001", "01001", "9" * 5000):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ArgumentError) as caught:
+                    _parse_args(["d", "k", LIMIT_OPTION, raw])
+                self.assertEqual(
+                    str(caught.exception),
+                    f"错误: 选项 {LIMIT_OPTION} 的值超出范围 1-1000: "
+                    f"{raw!r}",
+                )
+
+    def test_limit_leading_zeros_accepted(self) -> None:
+        self.assertEqual(_parse_args(["d", "k", LIMIT_OPTION, "007"])[10], 7)
+        self.assertEqual(_parse_args(["d", "k", LIMIT_OPTION, "1"])[10], 1)
+        self.assertEqual(_parse_args(["d", "k", LIMIT_OPTION, "01000"])[10], 1000)
+
+    def test_limit_value_equal_to_switch_is_consumed_as_value(self) -> None:
+        # --limit 的取值看似开关时先按字面消费，再按非法取值报错，
+        # 不会开启该开关。
+        with self.assertRaises(ArgumentError) as caught:
+            _parse_args(["d", "k", LIMIT_OPTION, ALL_LINES_OPTION])
+        self.assertEqual(
+            str(caught.exception),
+            f"错误: 选项 {LIMIT_OPTION} 的值必须是非空的 "
+            f"ASCII 十进制数字串: {ALL_LINES_OPTION!r}",
+        )
 
     def test_missing_positionals_raise_usage(self) -> None:
         for args in ([], ["d"]):
@@ -378,6 +423,7 @@ class ArgumentParsingCliTest(unittest.TestCase):
             FILE_TYPE_OPTION: (FILE_TYPE_OPTION, "txt", FILE_TYPE_OPTION, "md"),
             AND_KEYWORD_OPTION: (AND_KEYWORD_OPTION, "a", AND_KEYWORD_OPTION, "b"),
             NOT_KEYWORD_OPTION: (NOT_KEYWORD_OPTION, "a", NOT_KEYWORD_OPTION, "b"),
+            LIMIT_OPTION: (LIMIT_OPTION, "1", LIMIT_OPTION, "2"),
         }
         for name, tail in cases.items():
             self.assertParseFailure(
@@ -395,6 +441,7 @@ class ArgumentParsingCliTest(unittest.TestCase):
             FILE_TYPE_OPTION,
             AND_KEYWORD_OPTION,
             NOT_KEYWORD_OPTION,
+            LIMIT_OPTION,
         ):
             self.assertParseFailure(
                 f"错误: 选项 {name} 缺少值",
@@ -460,6 +507,37 @@ class ArgumentParsingCliTest(unittest.TestCase):
                 CONTEXT_CHARS_OPTION,
                 raw,
             )
+
+    def test_limit_format_and_range_failures(self) -> None:
+        for raw in ("2.5", "-1", "+3", " 3", "３", ""):
+            self.assertParseFailure(
+                f"错误: 选项 {LIMIT_OPTION} 的值必须是非空的 ASCII "
+                f"十进制数字串: {raw!r}",
+                str(self.root),
+                "target",
+                LIMIT_OPTION,
+                raw,
+            )
+        for raw in ("0", "000", "1001", "01001"):
+            self.assertParseFailure(
+                f"错误: 选项 {LIMIT_OPTION} 的值超出范围 1-1000: "
+                f"{raw!r}",
+                str(self.root),
+                "target",
+                LIMIT_OPTION,
+                raw,
+            )
+
+    def test_limit_value_equal_to_switch_does_not_enable_switch(self) -> None:
+        # 取值恰为开关记号时先按字面消费，随后报非法取值；开关不开启。
+        self.assertParseFailure(
+            f"错误: 选项 {LIMIT_OPTION} 的值必须是非空的 ASCII "
+            f"十进制数字串: {ALL_LINES_OPTION!r}",
+            str(self.root),
+            "target",
+            LIMIT_OPTION,
+            ALL_LINES_OPTION,
+        )
 
     def test_error_precedence_first_scanned_wins(self) -> None:
         # 目录错误在解析之后才检查：长度超范围先报，即使目录不存在。

@@ -16,7 +16,7 @@
 在项目根目录下执行：
 
 ```bash
-python -m local_search <目录> <关键词> [--path-contains <路径片段>] [--path-excludes <路径片段>] [--ignore-case] [--all-lines] [--context-chars <0-200>]
+python -m local_search <目录> <关键词> [--path-contains <路径片段>] [--path-excludes <路径片段>] [--ignore-case] [--all-lines] [--context-chars <0-200>] [--file-type <txt|md>]
 ```
 
 - `<目录>`：要扫描的目录，支持绝对路径或相对于当前工作目录的相对路径，可包含中文或空格（记得加引号）。
@@ -25,6 +25,7 @@ python -m local_search <目录> <关键词> [--path-contains <路径片段>] [--
 - `--all-lines`：可选的无取值开关，只能写在两个位置参数之后，可与另外两个选项以任意先后顺序同用。启用后**每个命中行各返回一项**，同一行多次出现关键词仍只返回一项，片段以该行最左侧命中为中心；不指定时保留默认行为——每个文件只返回按行号、行内位置确定的首个命中。第二个位置参数或 `--path-contains` 的取值即使恰好写作 `--all-lines`，也仍按字面文本处理，不会开启该模式。重复指定该开关时报错。
 - `--context-chars <0-200>`：可选的带取值选项，只能写在两个位置参数之后，可与其他选项以任意先后顺序同用。指定命中关键词**前后各保留多少个 Unicode 码点**（中文与补充平面字符各算一个码点，关键词自身长度不计入额度），到行首或行尾停止，不借用相邻行也不添加省略号；`snippet` 仍取自源文本，保留原始大小写。取值只接受非空的 ASCII 十进制数字串，允许前导零（如 `007`），范围 0 至 200；首尾空白、正负号、小数及非 ASCII 数字均不接受。传入 `0` 时片段只保留完整命中关键词；不指定该选项时仍为前后各 30 个码点。第二个位置参数或 `--path-contains` 的取值即使恰好写作 `--context-chars`，也仍按字面文本处理。缺少取值、重复指定、取值格式不合要求或超出范围时报错，且不开始目录扫描。
 - `--path-excludes <路径片段>`：可选的带取值选项，只能写在两个位置参数之后，可与其他选项（含 `--path-contains`）以任意先后顺序同用。文件**相对于选定目录、统一使用正斜杠**的路径中只要**区分大小写地连续包含该字面子串**，该文件即被排除、不参与内容检索：不读取文件内容，因此即使文件无法读取或含非法 UTF-8 字节也不告警。不解释正则或通配符，片段首尾空格按原样比较，匹配**不受 `--ignore-case` 影响**，选定目录本身的名称不参与比较。与 `--path-contains` 同用时，文件须符合包含条件且不符合排除条件才参与检索；两个片段相同时所有文件都被排除，输出 `[]`。取值即使看似开关（如 `--ignore-case`）也按字面片段处理，不启用任何开关；第二个位置参数或其他选项的取值即使恰好写作 `--path-excludes`，也仍按字面文本处理。缺少取值、重复指定、值为空或全为空白时在扫描前报错（退出码 2、标准输出为空）。
+- `--file-type <txt|md>`：可选的带取值选项，只能写在两个位置参数之后，可与其他选项以任意先后顺序同用，每次最多指定一次。取值**仅接受小写字面值 `txt` 或 `md`**：`txt` 只选择扩展名为 `.txt` 的普通文件，`md` 只选择 `.md`，扩展名比较仍忽略大小写（如 `notes/b.MD` 计入 md）。空值、纯空白、首尾空白、大写值（如 `TXT`、`Md`）及其他格式（如 `markdown`、`log`、`.txt`）均为非法取值。未传该选项时继续同时检索两种格式。格式条件与路径包含、排除条件共同生效，只有满足全部条件的文件才参与内容匹配；被格式条件排除的文件不读取、不告警。被选中的不可读或非法 UTF-8 文件仍按既有规则告警后跳过，其余文件继续检索，退出码为 0。紧随该选项的参数即使看似开关（如 `--ignore-case`）也作为其值校验，不开启该开关；第二个位置参数或其他路径选项的取值即使恰好写作 `--file-type`，也仍按字面文本处理。缺值、重复指定或非法取值均在扫描前报错（退出码 2、标准输出为空）。
 - 只扫描该目录及其子目录中的普通文件，扩展名（大小写不敏感）为 `.txt` 或 `.md`；不跟随符号链接。
 - 匹配限定在单行内；默认每个文件只返回按行号、行内位置确定的**首个命中**，同一文件多个命中不重复返回；指定 `--all-lines` 后同一文件的每个命中行各返回一项（同一行的多次出现仍只算一项）。
 - 标准输出是一个 JSON 数组，每项仅含：
@@ -169,7 +170,25 @@ $ echo $?
 
 只有同时满足“路径包含 `notes/`”且“路径不包含 `private/`”的文件才参与检索：`notes/private/c.txt` 在读取前即被排除，因此既不参与匹配也不产生解码告警，标准错误为空。去掉 `--path-excludes private/` 后，坏文件会保留为候选并按第 8 节的方式告警跳过。排除匹配同样区分大小写、按字面子串比较，`--ignore-case` 不影响它。
 
-### 11. 错误情形（退出码 2，标准输出为空，原因写入标准错误）
+### 11. 用 --file-type 只检索一种格式
+
+准备一个同时含三种扩展名的目录 `sample`：`a.txt` 内容为 `target root`，`notes/b.MD` 内容为 `Target note`，`other.log` 内容为 `target log`。
+
+```bash
+$ python -m local_search sample TARGET --ignore-case --file-type txt --context-chars 0
+[{"path": "a.txt", "line": 1, "snippet": "target"}]
+$ echo $?
+0
+
+$ python -m local_search sample TARGET --ignore-case --file-type md --context-chars 0
+[{"path": "notes/b.MD", "line": 1, "snippet": "Target"}]
+$ echo $?
+0
+```
+
+`--file-type txt` 只返回 `a.txt`，`--file-type md` 只返回 `notes/b.MD`（扩展名大小写不敏感，`.MD` 计入 md）；`other.log` 从不参与。未传该选项时两种格式仍同时检索。格式条件与路径包含、排除条件共同生效：不满足格式条件的文件在读取前即被排除，既不读取也不告警，因此目录中无法读取或含非法 UTF-8 字节的另一种格式文件不会产生任何告警；而被格式选中的坏文件仍按第 8 节告警跳过、退出码为 0。无符合格式的命中文件时输出 `[]`。
+
+### 12. 错误情形（退出码 2，标准输出为空，原因写入标准错误）
 
 ```bash
 $ python -m local_search "不存在的目录" target
@@ -226,6 +245,21 @@ $ python -m local_search "资料" target --path-excludes a --path-excludes b
 错误: 选项 --path-excludes 只能指定一次
 $ echo $?
 2
+
+$ python -m local_search "资料" target --file-type
+错误: 选项 --file-type 缺少值
+$ echo $?
+2
+
+$ python -m local_search "资料" target --file-type TXT
+错误: 选项 --file-type 的值必须是小写的 txt 或 md: 'TXT'
+$ echo $?
+2
+
+$ python -m local_search "资料" target --file-type txt --file-type md
+错误: 选项 --file-type 只能指定一次
+$ echo $?
+2
 ```
 
-关键词为空或全为空白、重复指定任何选项（`--ignore-case`、`--all-lines`、`--context-chars`、`--path-contains`、`--path-excludes`）、带值选项缺少取值或取值格式/范围不合要求（此类错误在目录扫描开始前即报出）、`--path-contains`/`--path-excludes` 的路径片段为空或全为空白、出现无法识别的多余参数（注意选项只能写在两个位置参数之后，`--ignore-case`、`--all-lines` 出现在关键词之前会被当作多余参数）、目录不存在、路径不是目录或目录遍历失败时，均退出码 2、标准输出为空并在标准错误说明原因。
+关键词为空或全为空白、重复指定任何选项（`--ignore-case`、`--all-lines`、`--context-chars`、`--path-contains`、`--path-excludes`、`--file-type`）、带值选项缺少取值或取值格式/范围不合要求（此类错误在目录扫描开始前即报出）、`--path-contains`/`--path-excludes` 的路径片段为空或全为空白、`--file-type` 的取值为空、纯空白、含首尾空白、大写或非 `txt`/`md` 的其他格式、出现无法识别的多余参数（注意选项只能写在两个位置参数之后，`--ignore-case`、`--all-lines` 出现在关键词之前会被当作多余参数）、目录不存在、路径不是目录或目录遍历失败时，均退出码 2、标准输出为空并在标准错误说明原因。

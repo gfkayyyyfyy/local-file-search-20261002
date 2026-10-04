@@ -7,6 +7,7 @@
                            [--context-chars <0-200>]
                            [--file-type <txt|md>]
                            [--and-keyword <附加关键词>]
+                           [--not-keyword <排除词>]
 
 仅依赖 Python 3 标准库，离线运行，只读扫描源文件，不生成索引。
 """
@@ -27,6 +28,7 @@ ALL_LINES_OPTION = "--all-lines"
 CONTEXT_CHARS_OPTION = "--context-chars"
 FILE_TYPE_OPTION = "--file-type"
 AND_KEYWORD_OPTION = "--and-keyword"
+NOT_KEYWORD_OPTION = "--not-keyword"
 # --file-type 的合法小写字面量到受支持扩展名（扩展名比较仍忽略大小写）。
 FILE_TYPE_SUFFIXES = {"txt": (".txt",), "md": (".md",)}
 USAGE = (
@@ -34,7 +36,7 @@ USAGE = (
     "[--path-contains <路径片段>] [--path-excludes <路径片段>] "
     "[--ignore-case] [--all-lines] "
     "[--context-chars <0-200>] [--file-type <txt|md>] "
-    "[--and-keyword <附加关键词>]"
+    "[--and-keyword <附加关键词>] [--not-keyword <排除词>]"
 )
 
 # 仅折叠 ASCII 的 A-Z 到 a-z；translate 按码点一一映射，不产生多字符展开
@@ -153,20 +155,30 @@ def _parse_file_type(raw: str) -> str:
     return raw
 
 
-def _match_line(search_line: str, keyword: str, and_keyword: str | None) -> int:
+def _match_line(
+    search_line: str,
+    keyword: str,
+    and_keyword: str | None,
+    not_keyword: str | None,
+) -> int:
     """在单行检索视图中做命中判定，返回主关键词最左侧命中的位置，未命中返回 -1。
 
-    ``search_line`` 是已经按需折叠大小写的行文本，``keyword`` 与
-    ``and_keyword`` 是与之对应的关键词形式；区分大小写与忽略大小写两个分支
+    ``search_line`` 是已经按需折叠大小写的行文本，``keyword``、``and_keyword``
+    与 ``not_keyword`` 是与之对应的关键词形式；区分大小写与忽略大小写两个分支
     只在进入本函数前如何构造这些文本上不同，判定逻辑完全一致。
 
     and_keyword 不为 None 时，同一行还须包含该附加关键词（位置不限，可与主
     关键词的命中重叠或共用文字），否则同样按未命中处理。
+
+    not_keyword 不为 None 时，同一行不得包含该排除词：判定覆盖完整的当前行，
+    排除词出现在片段上下文之外同样排除该行；其他行出现该词不影响本行。
     """
     position = search_line.find(keyword)
     if position == -1:
         return -1
     if and_keyword is not None and and_keyword not in search_line:
+        return -1
+    if not_keyword is not None and not_keyword in search_line:
         return -1
     return position
 
@@ -178,6 +190,7 @@ def _search_file(
     all_lines: bool = False,
     context_chars: int = DEFAULT_CONTEXT_CHARS,
     and_keyword: str | None = None,
+    not_keyword: str | None = None,
 ) -> list[dict]:
     """在单个文件中查找单行命中，返回结果项列表（无命中返回空列表）。
 
@@ -195,6 +208,12 @@ def _search_file(
     匹配可共用文字。ignore_case 同时作用于两个关键词，仍只折叠 ASCII 字母。
     片段仍只围绕主关键词在该行最左侧的命中，不为展示附加关键词扩大片段。
 
+    not_keyword 不为 None 时，命中行还不得包含该排除词：同样按连续字面子串
+    匹配（不拆词、不解释正则或通配符，首尾空格保留），判定覆盖完整的当前行，
+    排除词出现在片段上下文之外也排除该行，其他行出现该词不影响本行；
+    ignore_case 同样作用于排除词，仍只折叠 ASCII 字母。默认只返回首个命中时，
+    被排除的较早行不算命中，继续向后寻找合格行。
+
     all_lines 为假（默认）时只返回按行号、行内位置确定的首个命中；
     all_lines 为真时每个命中行各返回一项，按行号递增排列。同一行多次出现
     关键词仍只产生一项，片段以该行最左侧命中为中心。
@@ -209,13 +228,16 @@ def _search_file(
     folded_and_keyword = (
         _ascii_lower(and_keyword) if ignore_case and and_keyword is not None else and_keyword
     )
+    folded_not_keyword = (
+        _ascii_lower(not_keyword) if ignore_case and not_keyword is not None else not_keyword
+    )
     hits: list[dict] = []
     for line_number, raw_line in enumerate(content.split("\n"), start=1):
         line = raw_line.rstrip("\r\n")
         # 命中判定统一在“检索视图”上进行：忽略大小写时为 ASCII 折叠后的行，
         # 否则为原行；两种模式共用 _match_line 的同一套判定。
         search_line = _ascii_lower(line) if ignore_case else line
-        position = _match_line(search_line, folded_keyword, folded_and_keyword)
+        position = _match_line(search_line, folded_keyword, folded_and_keyword, folded_not_keyword)
         if position == -1:
             continue
         start = max(0, position - context_chars)
@@ -253,7 +275,7 @@ class _OptionSpec:
         self.validate = validate
 
 
-# 七个选项共用同一套规则（至多出现一次；带值选项缺值即报错；取值按字面
+# 八个选项共用同一套规则（至多出现一次；带值选项缺值即报错；取值按字面
 # 消费），差异只在“是否带值”“缺省值”和“取值校验”三处，集中在本表声明。
 # 新增选项时只需在此追加一行，无需改动扫描循环。
 _OPTION_SPECS = (
@@ -274,13 +296,14 @@ _OPTION_SPECS = (
         validate=_parse_file_type,
     ),
     _OptionSpec(AND_KEYWORD_OPTION, takes_value=True, default=None),
+    _OptionSpec(NOT_KEYWORD_OPTION, takes_value=True, default=None),
 )
 _OPTION_BY_TOKEN = {spec.name: spec for spec in _OPTION_SPECS}
 
 
 def _parse_args(
     args: list[str],
-) -> tuple[str, str, str | None, str | None, bool, bool, int, str | None, str | None]:
+) -> tuple[str, str, str | None, str | None, bool, bool, int, str | None, str | None, str | None]:
     """解析参数：恰好两个位置参数，其后可出现选项。
 
     支持的选项：
@@ -303,6 +326,10 @@ def _parse_args(
       关键词才算命中，取紧随选项的一个参数，该值同样按字面消费（即使
       看起来像开关，如 ``--all-lines``，也按文本处理而不开启该开关）；
       缺省为 ``None``，表示不做双关键词筛选，缺值或重复指定均报错。
+    - ``--not-keyword <排除词>``：要求命中行不包含该排除词，取紧随选项的
+      一个参数，该值同样按字面消费（即使看起来像开关，如 ``--all-lines``，
+      也按文本处理而不开启该开关）；缺省为 ``None``，表示不做排除词筛选，
+      缺值或重复指定均报错。
 
     选项只允许出现在两个位置参数之后，相互先后顺序不限。不使用通用
     选项解析：两个位置参数按字面取值，因此以连字符开头的关键词（即使恰好
@@ -350,6 +377,7 @@ def _parse_args(
         values[CONTEXT_CHARS_OPTION],
         values[FILE_TYPE_OPTION],
         values[AND_KEYWORD_OPTION],
+        values[NOT_KEYWORD_OPTION],
     )
 
 
@@ -367,6 +395,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             context_chars,
             file_type,
             and_keyword,
+            not_keyword,
         ) = _parse_args(args)
     except ArgumentError as exc:
         return _fail(str(exc))
@@ -379,6 +408,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _fail(f"错误: {PATH_EXCLUDES_OPTION} 的路径片段为空或全为空白")
     if and_keyword is not None and not and_keyword.strip():
         return _fail(f"错误: {AND_KEYWORD_OPTION} 的附加关键词为空或全为空白")
+    if not_keyword is not None and not not_keyword.strip():
+        return _fail(f"错误: {NOT_KEYWORD_OPTION} 的排除词为空或全为空白")
     if not os.path.exists(target_dir):
         return _fail(f"错误: 目录不存在: {target_dir}")
     if not os.path.isdir(target_dir):
@@ -406,7 +437,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             continue
         try:
             hits = _search_file(
-                path, keyword, ignore_case, all_lines, context_chars, and_keyword
+                path, keyword, ignore_case, all_lines, context_chars, and_keyword, not_keyword
             )
         except UnicodeDecodeError as exc:
             _emit_stderr(f"警告: 跳过文件 {rel}: 无法按 UTF-8 解码 ({exc})")

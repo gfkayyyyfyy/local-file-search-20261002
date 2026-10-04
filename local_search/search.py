@@ -12,7 +12,8 @@
 import json
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from typing import NamedTuple
 
 SUPPORTED_SUFFIXES = (".txt", ".md")
 DEFAULT_CONTEXT_CHARS = 30
@@ -177,27 +178,44 @@ def _search_file(
     return hits
 
 
+class _OptionSpec(NamedTuple):
+    """一个命令行选项的声明：是否带取值，以及取值的校验转换函数。
+
+    ``convert`` 仅对带值选项有意义：取值先按字面消费，再交给它校验并
+    转换为最终值；校验失败时抛出 ``ArgumentError``。无值开关与不需要
+    转换的带值选项（路径片段）为 ``None``。
+    """
+
+    takes_value: bool
+    convert: Callable[[str], object] | None = None
+
+
+# 全部支持的选项及其解析规则。重复指定、带值选项缺值、取值按字面消费等
+# 通用规则由 _parse_args 的扫描循环统一执行，各选项不再各自重复表达；
+# 新增选项只需在此登记一行。
+_OPTION_SPECS: dict[str, _OptionSpec] = {
+    PATH_OPTION: _OptionSpec(takes_value=True),
+    PATH_EXCLUDES_OPTION: _OptionSpec(takes_value=True),
+    IGNORE_CASE_OPTION: _OptionSpec(takes_value=False),
+    ALL_LINES_OPTION: _OptionSpec(takes_value=False),
+    CONTEXT_CHARS_OPTION: _OptionSpec(takes_value=True, convert=_parse_context_chars),
+}
+
+
 def _parse_args(
     args: list[str],
 ) -> tuple[str, str, str | None, str | None, bool, bool, int]:
     """解析参数：恰好两个位置参数，其后可出现选项。
 
-    支持的选项：
-    - ``--path-contains <片段>``：路径包含片段，取紧随选项的一个参数，该值
-      即使看起来像选项（包括 ``--path-excludes``、``--ignore-case``、
-      ``--all-lines``、``--context-chars``）也仍是字面值；
-    - ``--path-excludes <片段>``：路径排除片段，语义与取值规则同
-      ``--path-contains``；文件相对路径包含该片段即被排除，不读取其内容；
-    - ``--ignore-case``：无取值的开关，可重复指定即报错；
-    - ``--all-lines``：无取值的开关，每个命中行各返回一项，可重复指定即报错；
-    - ``--context-chars <0-200>``：片段上下文的码点数，取紧随选项的一个
-      参数，该值同样按字面消费（即使看起来像选项），随后按格式校验；
-      缺省为 30，可重复指定即报错。
+    选项只允许出现在两个位置参数之后，相互先后顺序不限，每个选项只能
+    指定一次。带值选项（``--path-contains``、``--path-excludes``、
+    ``--context-chars``）取紧随选项的一个参数，该值即使看起来像选项
+    （包括其他开关）也仍是字面值，不把它解释成任何开关；``--ignore-case``
+    与 ``--all-lines`` 为无取值的开关。``--context-chars`` 的取值随后按
+    ``_parse_context_chars`` 校验，缺省为 30。
 
-    选项只允许出现在两个位置参数之后，相互先后顺序不限。不使用通用
-    选项解析：两个位置参数按字面取值，因此以连字符开头的关键词（即使恰好
-    为 ``--path-contains``、``--path-excludes``、``--ignore-case``、
-    ``--all-lines`` 或 ``--context-chars``）仍是字面文本。
+    不使用通用选项解析：两个位置参数按字面取值，因此以连字符开头的关键词
+    （即使恰好为某个选项名）仍是字面文本。
     """
     if len(args) < 2:
         raise ArgumentError(USAGE)
@@ -205,61 +223,42 @@ def _parse_args(
     target_dir, keyword = args[0], args[1]
     rest = args[2:]
 
-    path_contains: str | None = None
-    path_excludes: str | None = None
-    ignore_case = False
-    all_lines = False
-    context_chars = DEFAULT_CONTEXT_CHARS
-    context_chars_seen = False
+    values: dict[str, object] = {
+        PATH_OPTION: None,
+        PATH_EXCLUDES_OPTION: None,
+        IGNORE_CASE_OPTION: False,
+        ALL_LINES_OPTION: False,
+        CONTEXT_CHARS_OPTION: DEFAULT_CONTEXT_CHARS,
+    }
+    seen: set[str] = set()
     index = 0
     while index < len(rest):
         token = rest[index]
-        if token == PATH_OPTION:
-            if path_contains is not None:
-                raise ArgumentError(f"错误: 选项 {PATH_OPTION} 只能指定一次")
+        spec = _OPTION_SPECS.get(token)
+        if spec is None:
+            raise ArgumentError(f"错误: 无法识别的参数: {token}")
+        if token in seen:
+            raise ArgumentError(f"错误: 选项 {token} 只能指定一次")
+        seen.add(token)
+        if spec.takes_value:
             if index + 1 >= len(rest):
-                raise ArgumentError(f"错误: 选项 {PATH_OPTION} 缺少值")
+                raise ArgumentError(f"错误: 选项 {token} 缺少值")
             # 取值始终按字面消费，不把它解释成任何开关。
-            path_contains = rest[index + 1]
-            index += 2
-        elif token == PATH_EXCLUDES_OPTION:
-            if path_excludes is not None:
-                raise ArgumentError(f"错误: 选项 {PATH_EXCLUDES_OPTION} 只能指定一次")
-            if index + 1 >= len(rest):
-                raise ArgumentError(f"错误: 选项 {PATH_EXCLUDES_OPTION} 缺少值")
-            # 取值始终按字面消费，不把它解释成任何开关。
-            path_excludes = rest[index + 1]
-            index += 2
-        elif token == IGNORE_CASE_OPTION:
-            if ignore_case:
-                raise ArgumentError(f"错误: 选项 {IGNORE_CASE_OPTION} 只能指定一次")
-            ignore_case = True
-            index += 1
-        elif token == ALL_LINES_OPTION:
-            if all_lines:
-                raise ArgumentError(f"错误: 选项 {ALL_LINES_OPTION} 只能指定一次")
-            all_lines = True
-            index += 1
-        elif token == CONTEXT_CHARS_OPTION:
-            if context_chars_seen:
-                raise ArgumentError(f"错误: 选项 {CONTEXT_CHARS_OPTION} 只能指定一次")
-            context_chars_seen = True
-            if index + 1 >= len(rest):
-                raise ArgumentError(f"错误: 选项 {CONTEXT_CHARS_OPTION} 缺少值")
-            # 取值始终按字面消费，不把它解释成任何开关。
-            context_chars = _parse_context_chars(rest[index + 1])
+            raw = rest[index + 1]
+            values[token] = spec.convert(raw) if spec.convert is not None else raw
             index += 2
         else:
-            raise ArgumentError(f"错误: 无法识别的参数: {token}")
+            values[token] = True
+            index += 1
 
     return (
         target_dir,
         keyword,
-        path_contains,
-        path_excludes,
-        ignore_case,
-        all_lines,
-        context_chars,
+        values[PATH_OPTION],
+        values[PATH_EXCLUDES_OPTION],
+        values[IGNORE_CASE_OPTION],
+        values[ALL_LINES_OPTION],
+        values[CONTEXT_CHARS_OPTION],
     )
 
 

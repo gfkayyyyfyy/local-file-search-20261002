@@ -121,33 +121,49 @@ def _collect_files(root: str, suffixes: Sequence[str] = SUPPORTED_SUFFIXES) -> l
     return collected
 
 
-def _parse_context_chars(raw: str) -> int:
-    """解析 --context-chars 的取值：非空 ASCII 十进制数字串，0 到 200。
+def _parse_decimal_in_range(raw: str, option: str, minimum: int, maximum: int) -> int:
+    """解析数字选项的取值：非空 ASCII 十进制数字串，数值在 minimum 到 maximum。
 
-    允许前导零（如 ``007`` 即 7），前导零的数量不影响数值，也不设字符串
-    长度上限；首尾空白、正负号、小数点、非 ASCII 数字（如全角数字）一律
-    拒绝。
+    ``--context-chars`` 与 ``--limit`` 共用同一套规则，集中在本函数维护：
+
+    - 格式：取值必须是非空的 ASCII 十进制数字串，允许任意数量前导零
+      （如 ``007`` 即 7），前导零不影响数值，也不设字符串长度上限；
+      取值按字面消费、不修剪空白，首尾空白、正负号、小数点、非 ASCII
+      数字（如全角数字）一律按格式错误拒绝；
+    - 范围：格式合法但数值不在 ``[minimum, maximum]`` 时按超范围处理。
 
     Python 3.11 及以上默认拒绝把超过 4300 位的数字串直接传给 ``int()``，
-    因此不能对超长取值直接转换。合法数值至多三位，先剔除不影响数值的
-    前导零：剩余位数超过三位必然大于 200，按超范围处理；其余至多三位，
-    转换不受整数长度限制影响，始终按数值而非字符串长度判断合法性。
+    因此不能对超长取值直接转换。maximum 至多四位（1000），先剔除不影响
+    数值的前导零：剩余位数超过 maximum 的位数必然大于 maximum，按超范围
+    处理；其余至多四位，转换不受整数长度限制影响，始终按数值而非字符串
+    长度判断合法性（五千个零仍按 0 接受，五千个 9 按超范围拒绝且不产生
+    异常堆栈）。
     """
     if not raw or not raw.isascii() or not raw.isdecimal():
         raise ArgumentError(
-            f"错误: 选项 {CONTEXT_CHARS_OPTION} 的值必须是非空的 ASCII 十进制数字串: {raw!r}"
+            f"错误: 选项 {option} 的值必须是非空的 ASCII 十进制数字串: {raw!r}"
         )
     digits = raw.lstrip("0")
-    if len(digits) > 3:
+    if len(digits) > len(str(maximum)):
         raise ArgumentError(
-            f"错误: 选项 {CONTEXT_CHARS_OPTION} 的值超出范围 0-{MAX_CONTEXT_CHARS}: {raw!r}"
+            f"错误: 选项 {option} 的值超出范围 {minimum}-{maximum}: {raw!r}"
         )
     value = int(digits) if digits else 0
-    if value > MAX_CONTEXT_CHARS:
+    if value < minimum or value > maximum:
         raise ArgumentError(
-            f"错误: 选项 {CONTEXT_CHARS_OPTION} 的值超出范围 0-{MAX_CONTEXT_CHARS}: {raw!r}"
+            f"错误: 选项 {option} 的值超出范围 {minimum}-{maximum}: {raw!r}"
         )
     return value
+
+
+def _parse_context_chars(raw: str) -> int:
+    """解析 --context-chars 的取值：非空 ASCII 十进制数字串，0 到 200。
+
+    格式与范围规则与 :func:`_parse_limit` 完全一致，统一由
+    :func:`_parse_decimal_in_range` 维护；本选项区间为 0 至
+    :data:`MAX_CONTEXT_CHARS`，故全零取值（含任意数量前导零）按 0 接受。
+    """
+    return _parse_decimal_in_range(raw, CONTEXT_CHARS_OPTION, 0, MAX_CONTEXT_CHARS)
 
 
 def _parse_file_type(raw: str) -> str:
@@ -167,29 +183,12 @@ def _parse_file_type(raw: str) -> str:
 def _parse_limit(raw: str) -> int:
     """解析 --limit 的取值：非空 ASCII 十进制数字串，1 到 1000。
 
-    允许前导零（如 ``007`` 即 7），前导零的数量不影响数值，也不设字符串
-    长度上限；首尾空白、正负号、小数点、非 ASCII 数字（如全角数字）一律
-    拒绝。``0``（含 ``000`` 等前导零形式）不在 1-1000 范围内，按超范围
-    处理。
-
-    与 :func:`_parse_context_chars` 同理，先剔除不影响数值的前导零再判断
-    位数，避免把超长数字串直接传给 ``int()`` 触发整数长度限制。
+    格式规则与 :func:`_parse_context_chars` 完全一致，统一由
+    :func:`_parse_decimal_in_range` 维护；本选项区间为
+    :data:`MIN_LIMIT` 至 :data:`MAX_LIMIT`，``0``（含 ``000`` 等前导零
+    形式）不在范围内，按超范围处理。
     """
-    if not raw or not raw.isascii() or not raw.isdecimal():
-        raise ArgumentError(
-            f"错误: 选项 {LIMIT_OPTION} 的值必须是非空的 ASCII 十进制数字串: {raw!r}"
-        )
-    digits = raw.lstrip("0")
-    if len(digits) > 4:
-        raise ArgumentError(
-            f"错误: 选项 {LIMIT_OPTION} 的值超出范围 {MIN_LIMIT}-{MAX_LIMIT}: {raw!r}"
-        )
-    value = int(digits) if digits else 0
-    if value < MIN_LIMIT or value > MAX_LIMIT:
-        raise ArgumentError(
-            f"错误: 选项 {LIMIT_OPTION} 的值超出范围 {MIN_LIMIT}-{MAX_LIMIT}: {raw!r}"
-        )
-    return value
+    return _parse_decimal_in_range(raw, LIMIT_OPTION, MIN_LIMIT, MAX_LIMIT)
 
 
 def _parse_format(raw: str) -> str:

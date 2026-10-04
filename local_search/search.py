@@ -12,7 +12,8 @@
 import json
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from typing import Any
 
 SUPPORTED_SUFFIXES = (".txt", ".md")
 DEFAULT_CONTEXT_CHARS = 30
@@ -177,6 +178,46 @@ def _search_file(
     return hits
 
 
+class _OptionSpec:
+    """一个命令行选项的解析规格，``name`` 即它在命令行中的完整记号。
+
+    ``takes_value`` 为真时消费紧随其后的一个参数，该参数始终按字面值获取，
+    即使看起来像开关也不再二次解释；``validate`` 若给出，则对取到的字面值
+    做格式与范围校验，返回最终存入解析结果的值。``default`` 是选项缺省时
+    解析结果中使用的值。
+    """
+
+    def __init__(
+        self,
+        name: str,
+        takes_value: bool,
+        default: Any = None,
+        validate: Callable[[str], Any] | None = None,
+    ) -> None:
+        self.name = name
+        self.takes_value = takes_value
+        self.default = default
+        self.validate = validate
+
+
+# 五个选项共用同一套规则（至多出现一次；带值选项缺值即报错；取值按字面
+# 消费），差异只在“是否带值”“缺省值”和“取值校验”三处，集中在本表声明。
+# 新增选项时只需在此追加一行，无需改动扫描循环。
+_OPTION_SPECS = (
+    _OptionSpec(PATH_OPTION, takes_value=True),
+    _OptionSpec(PATH_EXCLUDES_OPTION, takes_value=True),
+    _OptionSpec(IGNORE_CASE_OPTION, takes_value=False, default=False),
+    _OptionSpec(ALL_LINES_OPTION, takes_value=False, default=False),
+    _OptionSpec(
+        CONTEXT_CHARS_OPTION,
+        takes_value=True,
+        default=DEFAULT_CONTEXT_CHARS,
+        validate=_parse_context_chars,
+    ),
+)
+_OPTION_BY_TOKEN = {spec.name: spec for spec in _OPTION_SPECS}
+
+
 def _parse_args(
     args: list[str],
 ) -> tuple[str, str, str | None, str | None, bool, bool, int]:
@@ -196,70 +237,48 @@ def _parse_args(
 
     选项只允许出现在两个位置参数之后，相互先后顺序不限。不使用通用
     选项解析：两个位置参数按字面取值，因此以连字符开头的关键词（即使恰好
-    为 ``--path-contains``、``--path-excludes``、``--ignore-case``、
-    ``--all-lines`` 或 ``--context-chars``）仍是字面文本。
+    为任一选项记号）仍是字面文本。
+
+    各选项的去重、缺值与取值校验由统一的扫描循环按 :data:`_OPTION_SPECS`
+    完成：选项记号按出现顺序查表，重复指定对所有选项都优先报“只能指定
+    一次”，带值选项缺紧随参数时报“缺少值”，无法查表的记号按出现位置报
+    “无法识别的参数”，因此多个错误并存时报告的仍是扫描到的第一个。
     """
     if len(args) < 2:
         raise ArgumentError(USAGE)
 
     target_dir, keyword = args[0], args[1]
-    rest = args[2:]
 
-    path_contains: str | None = None
-    path_excludes: str | None = None
-    ignore_case = False
-    all_lines = False
-    context_chars = DEFAULT_CONTEXT_CHARS
-    context_chars_seen = False
+    values: dict[str, Any] = {spec.name: spec.default for spec in _OPTION_SPECS}
+    seen: set[str] = set()
+    rest = args[2:]
     index = 0
     while index < len(rest):
         token = rest[index]
-        if token == PATH_OPTION:
-            if path_contains is not None:
-                raise ArgumentError(f"错误: 选项 {PATH_OPTION} 只能指定一次")
-            if index + 1 >= len(rest):
-                raise ArgumentError(f"错误: 选项 {PATH_OPTION} 缺少值")
-            # 取值始终按字面消费，不把它解释成任何开关。
-            path_contains = rest[index + 1]
-            index += 2
-        elif token == PATH_EXCLUDES_OPTION:
-            if path_excludes is not None:
-                raise ArgumentError(f"错误: 选项 {PATH_EXCLUDES_OPTION} 只能指定一次")
-            if index + 1 >= len(rest):
-                raise ArgumentError(f"错误: 选项 {PATH_EXCLUDES_OPTION} 缺少值")
-            # 取值始终按字面消费，不把它解释成任何开关。
-            path_excludes = rest[index + 1]
-            index += 2
-        elif token == IGNORE_CASE_OPTION:
-            if ignore_case:
-                raise ArgumentError(f"错误: 选项 {IGNORE_CASE_OPTION} 只能指定一次")
-            ignore_case = True
-            index += 1
-        elif token == ALL_LINES_OPTION:
-            if all_lines:
-                raise ArgumentError(f"错误: 选项 {ALL_LINES_OPTION} 只能指定一次")
-            all_lines = True
-            index += 1
-        elif token == CONTEXT_CHARS_OPTION:
-            if context_chars_seen:
-                raise ArgumentError(f"错误: 选项 {CONTEXT_CHARS_OPTION} 只能指定一次")
-            context_chars_seen = True
-            if index + 1 >= len(rest):
-                raise ArgumentError(f"错误: 选项 {CONTEXT_CHARS_OPTION} 缺少值")
-            # 取值始终按字面消费，不把它解释成任何开关。
-            context_chars = _parse_context_chars(rest[index + 1])
-            index += 2
-        else:
+        spec = _OPTION_BY_TOKEN.get(token)
+        if spec is None:
             raise ArgumentError(f"错误: 无法识别的参数: {token}")
+        if spec.name in seen:
+            raise ArgumentError(f"错误: 选项 {spec.name} 只能指定一次")
+        seen.add(spec.name)
+        if not spec.takes_value:
+            index += 1
+            continue
+        if index + 1 >= len(rest):
+            raise ArgumentError(f"错误: 选项 {spec.name} 缺少值")
+        # 取值始终按字面消费，不把它解释成任何开关。
+        raw_value = rest[index + 1]
+        values[spec.name] = spec.validate(raw_value) if spec.validate else raw_value
+        index += 2
 
     return (
         target_dir,
         keyword,
-        path_contains,
-        path_excludes,
-        ignore_case,
-        all_lines,
-        context_chars,
+        values[PATH_OPTION],
+        values[PATH_EXCLUDES_OPTION],
+        IGNORE_CASE_OPTION in seen,
+        ALL_LINES_OPTION in seen,
+        values[CONTEXT_CHARS_OPTION],
     )
 
 

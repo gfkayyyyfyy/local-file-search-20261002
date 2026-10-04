@@ -1,18 +1,20 @@
 """参数解析流程的端到端回归测试（重构后集中验证共用规则）。
 
-``local_search.search`` 中五个选项的“去重 / 缺值 / 取值校验”改由统一的
+``local_search.search`` 中六个选项的“去重 / 缺值 / 取值校验”改由统一的
 规格表扫描循环完成后，本文件固定其对外可观察行为，防止重构改变：
 
 - 前两个参数按字面解释：即使关键词恰为 ``--all-lines`` 等选项记号，也仍按
   字面文本检索；选项只允许出现在两个位置参数之后，相互顺序不限；
 - 带值选项的值始终按字面消费：``--path-contains --ignore-case`` 中的
-  ``--ignore-case`` 是路径片段而非开关，``--context-chars`` 的值看似开关时
-  也先被取值、再按数字格式报错；
-- 五个选项各自重复指定都报“只能指定一次”，三个带值选项缺紧随参数都报
+  ``--ignore-case`` 是路径片段而非开关，``--context-chars``、
+  ``--file-type`` 的值看似开关时也先被取值、再按各自格式报错；
+- 六个选项各自重复指定都报“只能指定一次”，四个带值选项缺紧随参数都报
   “缺少值”，无法识别的记号报“无法识别的参数”，且一律报告扫描到的第一个
   错误（多个错误并存时保持既有优先级）；
 - ``--context-chars`` 只接受非空 ASCII 十进制数字串、允许任意数量前导零、
   范围 0-200；空白、正负号、小数、非 ASCII 数字、超范围均拒绝；
+- ``--file-type`` 只接受小写字面值 ``txt`` 或 ``md``；空值、纯空白、首尾
+  空白、大写值及其他格式均拒绝；不指定时为 ``None``（两种格式都检索）；
 - 缺位置参数报用法，关键词或路径片段为空 / 全空白报对应文案；以上错误均在
   目录扫描前以退出码 2、空标准输出、单行中文标准错误返回，不出现异常堆栈；
 - 同一组选项任意调换顺序，标准输出 / 标准错误 / 退出码完全一致。
@@ -39,11 +41,12 @@ EXCLUDES_OPTION = "--path-excludes"
 IGNORE_CASE_OPTION = "--ignore-case"
 ALL_LINES_OPTION = "--all-lines"
 CONTEXT_CHARS_OPTION = "--context-chars"
+FILE_TYPE_OPTION = "--file-type"
 USAGE_LINE = (
     "用法: python -m local_search <目录> <关键词> "
     "[--path-contains <路径片段>] [--path-excludes <路径片段>] "
     "[--ignore-case] [--all-lines] "
-    "[--context-chars <0-200>]"
+    "[--context-chars <0-200>] [--file-type <txt|md>]"
 )
 
 
@@ -66,7 +69,7 @@ class ParseArgsUnitTest(unittest.TestCase):
     def test_defaults_when_no_options(self) -> None:
         self.assertEqual(
             _parse_args(["some-dir", "target"]),
-            ("some-dir", "target", None, None, False, False, 30),
+            ("some-dir", "target", None, None, False, False, 30, None),
         )
 
     def test_all_options_parsed_in_declared_tuple_order(self) -> None:
@@ -82,18 +85,20 @@ class ParseArgsUnitTest(unittest.TestCase):
                 ALL_LINES_OPTION,
                 CONTEXT_CHARS_OPTION,
                 "0",
+                FILE_TYPE_OPTION,
+                "md",
             ]
         )
         self.assertEqual(
             parsed,
-            ("some-dir", "TARGET", "notes/", "private/", True, True, 0),
+            ("some-dir", "TARGET", "notes/", "private/", True, True, 0, "md"),
         )
 
     def test_option_token_as_keyword_stays_literal(self) -> None:
         # 关键词恰为开关记号时，后面的位置才进入选项扫描。
         self.assertEqual(
             _parse_args(["some-dir", ALL_LINES_OPTION, IGNORE_CASE_OPTION]),
-            ("some-dir", ALL_LINES_OPTION, None, None, True, False, 30),
+            ("some-dir", ALL_LINES_OPTION, None, None, True, False, 30, None),
         )
 
     def test_option_token_as_value_stays_literal(self) -> None:
@@ -126,6 +131,7 @@ class ParseArgsUnitTest(unittest.TestCase):
             [CONTEXT_CHARS_OPTION, "1", CONTEXT_CHARS_OPTION, "2"],
             [PATH_OPTION, "a", PATH_OPTION, "b"],
             [EXCLUDES_OPTION, "a", EXCLUDES_OPTION, "b"],
+            [FILE_TYPE_OPTION, "txt", FILE_TYPE_OPTION, "md"],
         )
         for tail in cases:
             name = tail[0]
@@ -137,12 +143,27 @@ class ParseArgsUnitTest(unittest.TestCase):
                 )
 
     def test_missing_value_raises_for_value_options(self) -> None:
-        for name in (PATH_OPTION, EXCLUDES_OPTION, CONTEXT_CHARS_OPTION):
+        for name in (PATH_OPTION, EXCLUDES_OPTION, CONTEXT_CHARS_OPTION, FILE_TYPE_OPTION):
             with self.subTest(name=name):
                 with self.assertRaises(ArgumentError) as caught:
                     _parse_args(["d", "k", name])
                 self.assertEqual(
                     str(caught.exception), f"错误: 选项 {name} 缺少值"
+                )
+
+    def test_file_type_only_accepts_lowercase_literals(self) -> None:
+        for raw in ("txt", "md"):
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    _parse_args(["d", "k", FILE_TYPE_OPTION, raw])[7], raw
+                )
+        for raw in ("", " ", "  ", " txt", "txt ", "TXT", "Md", "log", "markdown"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ArgumentError) as caught:
+                    _parse_args(["d", "k", FILE_TYPE_OPTION, raw])
+                self.assertEqual(
+                    str(caught.exception),
+                    f"错误: 选项 {FILE_TYPE_OPTION} 的值必须是 txt 或 md: {raw!r}",
                 )
 
     def test_unknown_token_raises(self) -> None:
@@ -300,6 +321,12 @@ class ArgumentParsingCliTest(unittest.TestCase):
             ),
             PATH_OPTION: (PATH_OPTION, "a", PATH_OPTION, "b"),
             EXCLUDES_OPTION: (EXCLUDES_OPTION, "a", EXCLUDES_OPTION, "b"),
+            FILE_TYPE_OPTION: (
+                FILE_TYPE_OPTION,
+                "txt",
+                FILE_TYPE_OPTION,
+                "md",
+            ),
         }
         for name, tail in cases.items():
             self.assertParseFailure(
@@ -310,7 +337,12 @@ class ArgumentParsingCliTest(unittest.TestCase):
             )
 
     def test_missing_values_fail_before_scan(self) -> None:
-        for name in (PATH_OPTION, EXCLUDES_OPTION, CONTEXT_CHARS_OPTION):
+        for name in (
+            PATH_OPTION,
+            EXCLUDES_OPTION,
+            CONTEXT_CHARS_OPTION,
+            FILE_TYPE_OPTION,
+        ):
             self.assertParseFailure(
                 f"错误: 选项 {name} 缺少值",
                 str(self.root),
@@ -416,6 +448,208 @@ class ArgumentParsingCliTest(unittest.TestCase):
             "target",
             EXCLUDES_OPTION,
             "  ",
+        )
+
+
+class FileTypeCliTest(unittest.TestCase):
+    """固定 --file-type 的筛选语义与验收场景。
+
+    目录仅含 a.txt（``target root``）、notes/b.MD（``Target note``）和
+    other.log（``target log``）：扩展名选择忽略大小写，但取值只接受小写
+    字面 txt/md；格式条件与路径条件共同生效。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name) / "sample"
+        (self.root / "notes").mkdir(parents=True)
+        (self.root / "a.txt").write_text("target root\n", encoding="utf-8")
+        (self.root / "notes" / "b.MD").write_text("Target note\n", encoding="utf-8")
+        (self.root / "other.log").write_text("target log\n", encoding="utf-8")
+
+    def test_acceptance_txt_and_md(self) -> None:
+        proc = run_cli(
+            str(self.root),
+            "TARGET",
+            IGNORE_CASE_OPTION,
+            FILE_TYPE_OPTION,
+            "txt",
+            CONTEXT_CHARS_OPTION,
+            "0",
+        )
+        stdout, stderr = decode(proc)
+        self.assertEqual(proc.returncode, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            json.loads(stdout),
+            [{"path": "a.txt", "line": 1, "snippet": "target"}],
+        )
+
+        proc = run_cli(
+            str(self.root),
+            "TARGET",
+            IGNORE_CASE_OPTION,
+            FILE_TYPE_OPTION,
+            "md",
+            CONTEXT_CHARS_OPTION,
+            "0",
+        )
+        stdout, stderr = decode(proc)
+        self.assertEqual(proc.returncode, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            json.loads(stdout),
+            [{"path": "notes/b.MD", "line": 1, "snippet": "Target"}],
+        )
+
+    def test_without_option_both_formats_still_searched(self) -> None:
+        proc = run_cli(
+            str(self.root), "TARGET", IGNORE_CASE_OPTION, CONTEXT_CHARS_OPTION, "0"
+        )
+        stdout, stderr = decode(proc)
+        self.assertEqual(proc.returncode, 0, stderr)
+        self.assertEqual(stderr, "")
+        # other.log 从不收集；两种文本格式各返回首个命中。
+        self.assertEqual(
+            json.loads(stdout),
+            [
+                {"path": "a.txt", "line": 1, "snippet": "target"},
+                {"path": "notes/b.MD", "line": 1, "snippet": "Target"},
+            ],
+        )
+
+    def test_option_order_does_not_change_result(self) -> None:
+        tails = (
+            (IGNORE_CASE_OPTION, FILE_TYPE_OPTION, "txt", CONTEXT_CHARS_OPTION, "0"),
+            (CONTEXT_CHARS_OPTION, "0", IGNORE_CASE_OPTION, FILE_TYPE_OPTION, "txt"),
+            (FILE_TYPE_OPTION, "txt", CONTEXT_CHARS_OPTION, "0", IGNORE_CASE_OPTION),
+        )
+        observed = []
+        for tail in tails:
+            proc = run_cli(str(self.root), "TARGET", *tail)
+            stdout, stderr = decode(proc)
+            self.assertEqual(proc.returncode, 0, stderr)
+            self.assertEqual(stderr, "")
+            observed.append(stdout)
+        self.assertEqual(len(set(observed)), 1)
+        self.assertEqual(
+            json.loads(observed[0]),
+            [{"path": "a.txt", "line": 1, "snippet": "target"}],
+        )
+
+    def test_no_matching_file_of_type_outputs_empty_array(self) -> None:
+        # 区分大小写：a.txt 只有小写 target，大写 TARGET 在 txt 中无命中。
+        proc = run_cli(str(self.root), "TARGET", FILE_TYPE_OPTION, "txt")
+        stdout, stderr = decode(proc)
+        self.assertEqual(proc.returncode, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertEqual(stdout, "[]\n")
+
+    def test_format_condition_and_path_filters_apply_together(self) -> None:
+        # md 但路径不含 notes/ → 全部排除，输出 []。
+        proc = run_cli(
+            str(self.root),
+            "TARGET",
+            IGNORE_CASE_OPTION,
+            FILE_TYPE_OPTION,
+            "md",
+            PATH_OPTION,
+            "other/",
+        )
+        stdout, stderr = decode(proc)
+        self.assertEqual(proc.returncode, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertEqual(stdout, "[]\n")
+
+        # 两个条件同时满足时正常命中。
+        proc = run_cli(
+            str(self.root),
+            "TARGET",
+            IGNORE_CASE_OPTION,
+            FILE_TYPE_OPTION,
+            "md",
+            PATH_OPTION,
+            "notes/",
+            CONTEXT_CHARS_OPTION,
+            "0",
+        )
+        stdout, stderr = decode(proc)
+        self.assertEqual(proc.returncode, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            json.loads(stdout),
+            [{"path": "notes/b.MD", "line": 1, "snippet": "Target"}],
+        )
+
+    def test_illegal_values_fail_before_scan(self) -> None:
+        for raw in ("", " ", "  ", " txt", "txt ", "TXT", "Md", "log", "markdown"):
+            proc = run_cli(str(self.root), "TARGET", FILE_TYPE_OPTION, raw)
+            stdout, stderr = decode(proc)
+            self.assertEqual(proc.returncode, 2, repr(raw))
+            self.assertEqual(stdout, "")
+            self.assertEqual(
+                stderr,
+                f"错误: 选项 {FILE_TYPE_OPTION} 的值必须是 txt 或 md: {raw!r}\n",
+            )
+
+    def test_value_looking_like_switch_is_consumed_as_value(self) -> None:
+        # --ignore-case 在此只是 --file-type 的取值：不开启开关，并按非法值报错。
+        proc = run_cli(
+            str(self.root), "TARGET", FILE_TYPE_OPTION, IGNORE_CASE_OPTION
+        )
+        stdout, stderr = decode(proc)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(stdout, "")
+        self.assertEqual(
+            stderr,
+            f"错误: 选项 {FILE_TYPE_OPTION} 的值必须是 txt 或 md: "
+            f"{IGNORE_CASE_OPTION!r}\n",
+        )
+
+    def test_keyword_equal_to_file_type_token_is_searched_literally(self) -> None:
+        hit_dir = Path(self._tmp.name) / "literal"
+        hit_dir.mkdir()
+        (hit_dir / "f.txt").write_text(
+            f"x {FILE_TYPE_OPTION} y\n", encoding="utf-8"
+        )
+        proc = run_cli(str(hit_dir), FILE_TYPE_OPTION, FILE_TYPE_OPTION, "txt")
+        stdout, stderr = decode(proc)
+        self.assertEqual(proc.returncode, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            json.loads(stdout),
+            [
+                {
+                    "path": "f.txt",
+                    "line": 1,
+                    "snippet": f"x {FILE_TYPE_OPTION} y",
+                }
+            ],
+        )
+
+    def test_excluded_format_bad_file_is_not_read_but_selected_one_warns(self) -> None:
+        # broken.txt 含非法 UTF-8；选 md 时它不被收集，故不告警。
+        (self.root / "broken.txt").write_bytes(b"bad \xff bytes\n")
+        proc = run_cli(str(self.root), "TARGET", IGNORE_CASE_OPTION,
+                       FILE_TYPE_OPTION, "md", CONTEXT_CHARS_OPTION, "0")
+        stdout, stderr = decode(proc)
+        self.assertEqual(proc.returncode, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            json.loads(stdout),
+            [{"path": "notes/b.MD", "line": 1, "snippet": "Target"}],
+        )
+
+        # 选 txt 时 broken.txt 属于候选：告警后跳过，a.txt 仍正常返回。
+        proc = run_cli(str(self.root), "TARGET", IGNORE_CASE_OPTION,
+                       FILE_TYPE_OPTION, "txt", CONTEXT_CHARS_OPTION, "0")
+        stdout, stderr = decode(proc)
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("警告: 跳过文件 broken.txt", stderr)
+        self.assertEqual(
+            json.loads(stdout),
+            [{"path": "a.txt", "line": 1, "snippet": "target"}],
         )
 
 

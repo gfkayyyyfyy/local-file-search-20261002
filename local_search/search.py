@@ -5,6 +5,7 @@
                            [--path-excludes <路径片段>]
                            [--ignore-case] [--all-lines]
                            [--context-chars <0-200>]
+                           [--file-type <txt|md>]
 
 仅依赖 Python 3 标准库，离线运行，只读扫描源文件，不生成索引。
 """
@@ -23,11 +24,14 @@ PATH_EXCLUDES_OPTION = "--path-excludes"
 IGNORE_CASE_OPTION = "--ignore-case"
 ALL_LINES_OPTION = "--all-lines"
 CONTEXT_CHARS_OPTION = "--context-chars"
+FILE_TYPE_OPTION = "--file-type"
+# --file-type 的合法小写字面取值到扩展名的映射；扩展名匹配仍忽略大小写。
+FILE_TYPE_SUFFIXES = {"txt": ".txt", "md": ".md"}
 USAGE = (
     "用法: python -m local_search <目录> <关键词> "
     "[--path-contains <路径片段>] [--path-excludes <路径片段>] "
     "[--ignore-case] [--all-lines] "
-    "[--context-chars <0-200>]"
+    "[--context-chars <0-200>] [--file-type <txt|md>]"
 )
 
 # 仅折叠 ASCII 的 A-Z 到 a-z；translate 按码点一一映射，不产生多字符展开
@@ -70,8 +74,13 @@ def _ascii_lower(text: str) -> str:
     return text.translate(_ASCII_UPPER_TO_LOWER)
 
 
-def _collect_files(root: str) -> list[str]:
-    """收集 root 下所有受支持的普通文件；不跟随任何符号链接。"""
+def _collect_files(root: str, suffixes: Sequence[str] = SUPPORTED_SUFFIXES) -> list[str]:
+    """收集 root 下扩展名属于 ``suffixes`` 的普通文件；不跟随任何符号链接。
+
+    扩展名比较忽略大小写：``suffixes`` 中的扩展名统一为小写，文件名先转
+    小写再判断后缀。``suffixes`` 缺省为全部受支持格式；``--file-type``
+    指定单一格式时，另一种格式在此处即不收集，不读取也不告警。
+    """
     collected: list[str] = []
 
     def scan(dirpath: str) -> None:
@@ -90,7 +99,7 @@ def _collect_files(root: str) -> list[str]:
                     scan(entry.path)
                 elif entry.is_file(follow_symlinks=False):
                     name = entry.name.lower()
-                    if name.endswith(SUPPORTED_SUFFIXES):
+                    if name.endswith(tuple(suffixes)):
                         collected.append(entry.path)
             except OSError as exc:
                 raise TraversalError(str(exc)) from exc
@@ -126,6 +135,20 @@ def _parse_context_chars(raw: str) -> int:
             f"错误: 选项 {CONTEXT_CHARS_OPTION} 的值超出范围 0-{MAX_CONTEXT_CHARS}: {raw!r}"
         )
     return value
+
+
+def _parse_file_type(raw: str) -> str:
+    """解析 --file-type 的取值：仅接受小写字面值 ``txt`` 或 ``md``。
+
+    按完全相等判断，不做任何修剪或大小写折叠：空值、纯空白、首尾带空白、
+    大写取值（如 ``TXT``、``Md``）以及其他格式（如 ``log``、``markdown``）
+    一律拒绝。
+    """
+    if raw not in FILE_TYPE_SUFFIXES:
+        raise ArgumentError(
+            f"错误: 选项 {FILE_TYPE_OPTION} 的值必须是 txt 或 md: {raw!r}"
+        )
+    return raw
 
 
 def _search_file(
@@ -200,7 +223,7 @@ class _OptionSpec:
         self.validate = validate
 
 
-# 五个选项共用同一套规则（至多出现一次；带值选项缺值即报错；取值按字面
+# 各选项共用同一套规则（至多出现一次；带值选项缺值即报错；取值按字面
 # 消费），差异只在“是否带值”“缺省值”和“取值校验”三处，集中在本表声明。
 # 新增选项时只需在此追加一行，无需改动扫描循环。
 _OPTION_SPECS = (
@@ -214,26 +237,36 @@ _OPTION_SPECS = (
         default=DEFAULT_CONTEXT_CHARS,
         validate=_parse_context_chars,
     ),
+    _OptionSpec(
+        FILE_TYPE_OPTION,
+        takes_value=True,
+        default=None,
+        validate=_parse_file_type,
+    ),
 )
 _OPTION_BY_TOKEN = {spec.name: spec for spec in _OPTION_SPECS}
 
 
 def _parse_args(
     args: list[str],
-) -> tuple[str, str, str | None, str | None, bool, bool, int]:
+) -> tuple[str, str, str | None, str | None, bool, bool, int, str | None]:
     """解析参数：恰好两个位置参数，其后可出现选项。
 
     支持的选项：
     - ``--path-contains <片段>``：路径包含片段，取紧随选项的一个参数，该值
       即使看起来像选项（包括 ``--path-excludes``、``--ignore-case``、
-      ``--all-lines``、``--context-chars``）也仍是字面值；
+      ``--all-lines``、``--context-chars``、``--file-type``）也仍是字面值；
     - ``--path-excludes <片段>``：路径排除片段，语义与取值规则同
       ``--path-contains``；文件相对路径包含该片段即被排除，不读取其内容；
     - ``--ignore-case``：无取值的开关，可重复指定即报错；
     - ``--all-lines``：无取值的开关，每个命中行各返回一项，可重复指定即报错；
     - ``--context-chars <0-200>``：片段上下文的码点数，取紧随选项的一个
       参数，该值同样按字面消费（即使看起来像选项），随后按格式校验；
-      缺省为 30，可重复指定即报错。
+      缺省为 30，可重复指定即报错；
+    - ``--file-type <txt|md>``：只检索一种格式，取紧随选项的一个参数，该值
+      同样按字面消费（即使看起来像开关也不开启该开关），只接受小写字面值
+      ``txt`` 或 ``md``；缺省为 ``None``，即同时检索两种格式，可重复指定即
+      报错。
 
     选项只允许出现在两个位置参数之后，相互先后顺序不限。不使用通用
     选项解析：两个位置参数按字面取值，因此以连字符开头的关键词（即使恰好
@@ -279,6 +312,7 @@ def _parse_args(
         IGNORE_CASE_OPTION in seen,
         ALL_LINES_OPTION in seen,
         values[CONTEXT_CHARS_OPTION],
+        values[FILE_TYPE_OPTION],
     )
 
 
@@ -294,6 +328,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ignore_case,
             all_lines,
             context_chars,
+            file_type,
         ) = _parse_args(args)
     except ArgumentError as exc:
         return _fail(str(exc))
@@ -309,8 +344,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not os.path.isdir(target_dir):
         return _fail(f"错误: 路径不是目录: {target_dir}")
 
+    # file_type 为 None 时收集两种格式；否则只收集指定扩展名的文件，
+    # 另一种格式不收集、不读取也不告警；扩展名比较仍忽略大小写。
+    suffixes = (
+        SUPPORTED_SUFFIXES
+        if file_type is None
+        else (FILE_TYPE_SUFFIXES[file_type],)
+    )
     try:
-        file_paths = _collect_files(target_dir)
+        file_paths = _collect_files(target_dir, suffixes)
     except TraversalError as exc:
         return _fail(f"错误: 无法完成目录遍历 {target_dir}: {exc}")
 

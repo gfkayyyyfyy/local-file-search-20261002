@@ -1,6 +1,6 @@
 """参数解析流程的端到端回归测试（重构后集中验证共用规则）。
 
-``local_search.search`` 中十一个选项的“去重 / 缺值 / 取值校验”改由统一的
+``local_search.search`` 中十三个选项的“去重 / 缺值 / 取值校验”改由统一的
 规格表扫描循环完成后，本文件固定其对外可观察行为，防止重构改变：
 
 - 前两个参数按字面解释：即使关键词恰为 ``--all-lines``、``--file-type``
@@ -9,7 +9,7 @@
 - 带值选项的值始终按字面消费：``--path-contains --ignore-case`` 中的
   ``--ignore-case`` 是路径片段而非开关，``--context-chars``、
   ``--file-type`` 的值看似开关时也先被取值、再按各自格式报错；
-- 十一个选项各自重复指定都报“只能指定一次”，九个带值选项缺紧随参数都报
+- 十三个选项各自重复指定都报“只能指定一次”，十个带值选项缺紧随参数都报
   “缺少值”，无法识别的记号报“无法识别的参数”，且一律报告扫描到的第一个
   错误（多个错误并存时保持既有优先级）；
 - ``--context-chars`` 只接受非空 ASCII 十进制数字串、允许任意数量前导零、
@@ -57,6 +57,7 @@ OR_KEYWORD_OPTION = "--or-keyword"
 LIMIT_OPTION = "--limit"
 OFFSET_OPTION = "--offset"
 FORMAT_OPTION = "--format"
+SHOW_COLUMN_OPTION = "--show-column"
 USAGE_LINE = (
     "用法: python -m local_search <目录> <关键词> "
     "[--path-contains <路径片段>] [--path-excludes <路径片段>] "
@@ -64,7 +65,8 @@ USAGE_LINE = (
     "[--context-chars <0-200>] [--file-type <txt|md>] "
     "[--and-keyword <附加关键词>] [--not-keyword <排除关键词>] "
     "[--or-keyword <替代关键词>] "
-    "[--limit <1-1000>] [--offset <0-1000>] [--format <json|csv>]"
+    "[--limit <1-1000>] [--offset <0-1000>] [--format <json|csv>] "
+    "[--show-column]"
 )
 
 
@@ -88,7 +90,7 @@ class ParseArgsUnitTest(unittest.TestCase):
         self.assertEqual(
             _parse_args(["some-dir", "target"]),
             ("some-dir", "target", None, None, False, False, 30, None, None, None,
-             None, None, 0, "json"),
+             None, None, 0, "json", False),
         )
 
     def test_all_options_parsed_in_declared_tuple_order(self) -> None:
@@ -118,20 +120,39 @@ class ParseArgsUnitTest(unittest.TestCase):
                 "1",
                 FORMAT_OPTION,
                 "csv",
+                SHOW_COLUMN_OPTION,
             ]
         )
         self.assertEqual(
             parsed,
             ("some-dir", "TARGET", "notes/", "private/", True, True, 0, "txt",
-             "budget", "draft", "backup", 2, 1, "csv"),
+             "budget", "draft", "backup", 2, 1, "csv", True),
         )
+
+    def test_show_column_parsed_in_any_position(self) -> None:
+        # 开关可与已有选项任意排序，始终落在结果元组末位。
+        base = ("some-dir", "target")
+        for tail in (
+            (SHOW_COLUMN_OPTION,),
+            (IGNORE_CASE_OPTION, SHOW_COLUMN_OPTION, ALL_LINES_OPTION),
+            (FORMAT_OPTION, "csv", SHOW_COLUMN_OPTION, CONTEXT_CHARS_OPTION, "0"),
+        ):
+            with self.subTest(tail=tail):
+                self.assertTrue(_parse_args([*base, *tail])[-1])
+
+    def test_show_column_off_by_default_even_when_token_is_value(self) -> None:
+        # 同名文本作为关键词或带值选项的取值时不开启列号。
+        self.assertFalse(_parse_args(["d", SHOW_COLUMN_OPTION])[-1])
+        parsed = _parse_args(["d", "k", PATH_OPTION, SHOW_COLUMN_OPTION])
+        self.assertEqual(parsed[2], SHOW_COLUMN_OPTION)
+        self.assertFalse(parsed[-1])
 
     def test_option_token_as_keyword_stays_literal(self) -> None:
         # 关键词恰为开关记号时，后面的位置才进入选项扫描。
         self.assertEqual(
             _parse_args(["some-dir", ALL_LINES_OPTION, IGNORE_CASE_OPTION]),
             ("some-dir", ALL_LINES_OPTION, None, None, True, False, 30, None, None,
-             None, None, None, 0, "json"),
+             None, None, None, 0, "json", False),
         )
 
     def test_option_token_as_file_type_keyword_stays_literal(self) -> None:
@@ -139,7 +160,7 @@ class ParseArgsUnitTest(unittest.TestCase):
         self.assertEqual(
             _parse_args(["some-dir", FILE_TYPE_OPTION, IGNORE_CASE_OPTION]),
             ("some-dir", FILE_TYPE_OPTION, None, None, True, False, 30, None, None,
-             None, None, None, 0, "json"),
+             None, None, None, 0, "json", False),
         )
 
     def test_option_token_as_value_stays_literal(self) -> None:
@@ -179,6 +200,7 @@ class ParseArgsUnitTest(unittest.TestCase):
             [LIMIT_OPTION, "1", LIMIT_OPTION, "2"],
             [OFFSET_OPTION, "1", OFFSET_OPTION, "2"],
             [FORMAT_OPTION, "json", FORMAT_OPTION, "csv"],
+            [SHOW_COLUMN_OPTION, SHOW_COLUMN_OPTION],
         )
         for tail in cases:
             name = tail[0]
@@ -534,6 +556,7 @@ class ArgumentParsingCliTest(unittest.TestCase):
             LIMIT_OPTION: (LIMIT_OPTION, "1", LIMIT_OPTION, "2"),
             OFFSET_OPTION: (OFFSET_OPTION, "1", OFFSET_OPTION, "2"),
             FORMAT_OPTION: (FORMAT_OPTION, "json", FORMAT_OPTION, "csv"),
+            SHOW_COLUMN_OPTION: (SHOW_COLUMN_OPTION, SHOW_COLUMN_OPTION),
         }
         for name, tail in cases.items():
             self.assertParseFailure(

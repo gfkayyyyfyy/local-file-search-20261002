@@ -25,12 +25,12 @@
 
   - local_search/__init__.py:3 声明 __all__ = ["main"]，
     local_search/__init__.py:5 从 .search 导入 main，
-  - 即 local_search.main，定义于 local_search/search.py:521
-    （函数 main(argv=None) -> int，local_search/search.py:521-612）。
+  - 即 local_search.main，定义于 local_search/search.py:533
+    （函数 main(argv=None) -> int，local_search/search.py:533-625）。
 
 local_search.main 接受与命令行等价的参数列表（list[str]），返回整数
 状态码并向标准输出写入结果；它本身不调用 sys.exit，成功处理完查询
-返回 0（local_search/search.py:612），各类失败经 _fail 返回 2
+返回 0（local_search/search.py:625），各类失败经 _fail 返回 2
 （_fail 定义于 local_search/search.py:77-79：先把消息写入标准错误，
 再 return 2）。因此两种入口观察到的退出码、标准输出、标准错误完全
 一致。对应既有用例：
@@ -45,31 +45,31 @@ local_search.main 接受与命令行等价的参数列表（list[str]），返�
 1. 一次查询中分页所处的位置
 ----------------------------
 
-main（local_search/search.py:521-612）内部严格按下列顺序执行，
+main（local_search/search.py:533-625）内部严格按下列顺序执行，
 分页（偏移与数量截断）只在全部文件处理完、排序之后进行：
 
-  阶段 A  参数解析        search.py:524-539（_parse_args，418-518）
+  阶段 A  参数解析        search.py:536-551（_parse_args，418-518）
                           --offset 与 --limit 的取值在此校验，
                           非法时在扫描前返回 2（见第 5 节）
-  阶段 B  空白值与目录检查 search.py:543-556
-  阶段 C  文件筛选        search.py:561-577，分两层：
-            C1 格式筛选   search.py:561-565：按 --file-type 确定后缀
+  阶段 B  空白值与目录检查 search.py:555-569
+  阶段 C  文件筛选        search.py:574-590，分两层：
+            C1 格式筛选   search.py:574-578：按 --file-type 确定后缀
                           集合，_collect_files（95-125）只收集匹配
                           后缀的普通文件；被格式排除的文件不进入候选
-            C2 路径筛选   search.py:569-577：--path-contains /
+            C2 路径筛选   search.py:582-590：--path-contains /
                           --path-excludes 按相对路径字面子串判断，
                           不满足则 continue，文件不被读取
-  阶段 D  合格行选择      search.py:579-590：对每个通过筛选的文件调用
+  阶段 D  合格行选择      search.py:592-603：对每个通过筛选的文件调用
                           _search_file（250-317），逐行判定命中并
                           收集结果项（见第 2 节的计数规则）；
                           读取或解码失败的文件告警后跳过（583-588）
-  阶段 E  排序            search.py:592-593：先按 path 的区分大小写
+  阶段 E  排序            search.py:605-606：先按 path 的区分大小写
                           Unicode 码点序，同一路径再按 line 升序
-  阶段 F  偏移            search.py:600-601：results = results[offset:]，
+  阶段 F  偏移            search.py:613-614：results = results[offset:]，
                           跳过排序后结果序列的前 N 项
-  阶段 G  数量截断        search.py:602-603：limit 不为 None 时
+  阶段 G  数量截断        search.py:615-616：limit 不为 None 时
                           results = results[:limit]
-  阶段 H  序列化与输出    search.py:605-611（CSV 或 JSON），返回 0（612）
+  阶段 H  序列化与输出    search.py:618-624（CSV 或 JSON），返回 0（612）
 
 要点：
 
@@ -81,11 +81,11 @@ main（local_search/search.py:521-612）内部严格按下列顺序执行，
       tests/test_limit.py
         LimitTest.test_truncation_follows_sorted_order_not_scan_order
   - 先偏移后限量：--offset 先跳过前 N 项，--limit 再对剩余项取前
-    M 项（search.py:600-603 的先后顺序）。对应既有用例：
+    M 项（search.py:613-616 的先后顺序）。对应既有用例：
       tests/test_offset.py
         OffsetTest.test_offset_applies_before_limit
   - 扫描与告警不受偏移或上限影响：即使结果被全部跳过或数量已足够，
-    候选坏文件的既有告警仍照常产生（search.py:595-599 注释），
+    候选坏文件的既有告警仍照常产生（search.py:608-612 注释），
     截取只在全部文件处理完、排序后进行（见第 6 节）。
 
 
@@ -99,7 +99,7 @@ main（local_search/search.py:521-612）内部严格按下列顺序执行，
 
   - 默认（不加 --all-lines）：每个文件只贡献首个合格行，即一项。
     _search_file 在收集到首个命中后立即 break
-    （local_search/search.py:315-316）。
+    （local_search/search.py:320-321）。
     对应既有用例：
       tests/test_offset.py
         OffsetTest.test_default_mode_counts_one_item_per_file
@@ -107,7 +107,7 @@ main（local_search/search.py:521-612）内部严格按下列顺序执行，
         LimitTest.test_default_mode_counts_one_item_per_file
 
   - 逐行模式（--all-lines）：每个合格行各贡献一项，同一文件可贡献
-    多项，按行号递增排列（search.py:299-314 的逐行循环不中断）。
+    多项，按行号递增排列（search.py:297-319 的逐行循环不中断）。
     对应既有用例：
       tests/test_offset.py
         OffsetTest.test_all_lines_counts_each_qualified_line
@@ -118,18 +118,18 @@ main（local_search/search.py:521-612）内部严格按下列顺序执行，
 
   - 同一行关键词重复出现仍只算一项：命中判定 _match_line
     （search.py:223-247）只对每行返回“是否命中及最左侧位置”，
-    每行至多向结果追加一项（search.py:309-314），片段以该行最左侧
+    每行至多向结果追加一项（search.py:314-319），片段以该行最左侧
     命中为中心。对应既有用例：
       tests/test_offset.py
         OffsetTest.test_repeated_keyword_on_same_line_counts_once
       tests/test_all_lines.py
         AllLinesTest.test_same_line_multiple_hits_yield_one_item_with_leftmost_snippet
 
-  - 行的合格性由全部关键词条件共同决定：主关键词命中，且指定
-    --and-keyword 时同行还须包含附加关键词，指定 --not-keyword 时
-    整行任何位置出现排除关键词即不合格（_match_line，
-    search.py:240-247）。不合格的行不产生结果项，自然不参与偏移
-    计数。
+  - 行的合格性由全部关键词条件共同决定：主关键词（或替代关键词）命中，
+    且重复指定 --and-keyword 时同行还须包含其中的每一个附加关键词，
+    指定 --not-keyword 时整行任何位置出现排除关键词即不合格
+    （_match_line，search.py:259-272）。不合格的行不产生结果项，自然
+    不参与偏移计数。
 
   - 跨文件汇总：所有文件的结果项先汇成完整序列，排序后统一编号，
     偏移按这个全局序列计数，与项来自哪个文件无关。对应既有用例：
@@ -138,7 +138,7 @@ main（local_search/search.py:521-612）内部严格按下列顺序执行，
       tests/test_limit.py
         LimitTest.test_limit_counts_items_across_files_in_sorted_order
 
-排序规则（search.py:592-593）：
+排序规则（search.py:605-606）：
 
     results.sort(key=lambda item: (item["path"], item["line"]))
 
@@ -172,7 +172,7 @@ main（local_search/search.py:521-612）内部严格按下列顺序执行，
   "target one target" 合格——虽然 "target" 出现两次，仍只算一项，
   片段取最左侧命中；默认模式下 a.txt 在第 2 行命中后即停止，第 3 行
   不再产生结果项。notes/b.md 第 1 行合格。--context-chars 0 使片段
-  只保留完整命中关键词（search.py:307-308，前后各保留 0 个码点）。
+  只保留完整命中关键词（search.py:312-313，前后各保留 0 个码点）。
 
   完整合格序列（排序后）：
     1. {"path": "a.txt",      "line": 2, "snippet": "target"}
@@ -224,14 +224,14 @@ main（local_search/search.py:521-612）内部严格按下列顺序执行，
 ------------
 
   - 未指定 --offset 等同于 0：选项缺省值为 0（_OPTION_SPECS，
-    search.py:402-407），search.py:600-601 的截取不跳过任何项，
+    search.py:409-414），search.py:613-614 的截取不跳过任何项，
     输出与未提供该选项时完全一致。显式写 0 或前导零形式（如 000）
     同样等价。对应既有用例：
       tests/test_offset.py
         OffsetTest.test_without_offset_output_unchanged
 
   - 未指定 --limit 时保留全部剩余项：选项缺省值为 None
-    （search.py:396-401），search.py:602-603 的截断不执行，
+    （search.py:403-408），search.py:615-616 的截断不执行，
     偏移之后剩余多少项就输出多少项。对应既有用例：
       tests/test_offset.py
         OffsetTest.test_demo_scenario_offset_two_without_limit
@@ -239,7 +239,7 @@ main（local_search/search.py:521-612）内部严格按下列顺序执行，
         LimitTest.test_fewer_results_than_limit_returns_all
 
   - 偏移达到或超过总项数时成功返回空结果：results[offset:] 得到空
-    列表（search.py:600-601），与无命中走同一条输出路径，退出码
+    列表（search.py:613-614），与无命中走同一条输出路径，退出码
     仍为 0，不是错误。对应既有用例：
       tests/test_offset.py
         OffsetTest.test_offset_equal_to_total_returns_empty_json
@@ -247,9 +247,9 @@ main（local_search/search.py:521-612）内部严格按下列顺序执行，
 
   - 空结果的输出形式随格式而定：
       JSON（默认或 --format json）：标准输出为空数组 [] 加一个换行
-        （json.dumps，search.py:609）；
+        （json.dumps，search.py:622）；
       CSV（--format csv）：只有原有表头 path,line,snippet 及其 CRLF
-        （_render_csv，search.py:331-349，表头在 338 行）。
+        （_render_csv，search.py:336-356，表头在 338 行）。
     对应既有用例：
       tests/test_offset.py
         OffsetTest.test_offset_beyond_total_csv_outputs_header_only
@@ -257,7 +257,7 @@ main（local_search/search.py:521-612）内部严格按下列顺序执行，
         CsvFormatTest.test_no_hit_outputs_header_only
 
   - 格式选择不改变分页顺序：检索、排序、偏移与限量在两种格式下完全
-    一致，--format 只影响最后的序列化（search.py:605-611 注释与
+    一致，--format 只影响最后的序列化（search.py:618-624 注释与
     分支）。对应既有用例：
       tests/test_offset.py
         OffsetTest.test_csv_format_applies_offset
@@ -279,13 +279,13 @@ _parse_decimal_in_range，search.py:128-160）：
     校验，不开启该开关。
 
 错误情形与行为：缺值、重复指定、格式非法或数值越界，都在目录扫描
-开始之前由参数解析阶段（search.py:524-541）经 _fail 返回 2——
+开始之前由参数解析阶段（search.py:536-553）经 _fail 返回 2——
 
-  - 退出码 2，标准输出完全为空（结果输出在 search.py:610，所有
+  - 退出码 2，标准输出完全为空（结果输出在 search.py:623，所有
     出错路径都在其之前 return）；
   - 标准错误为一行“错误: ...”，包含 --offset 与对应原因：
-      缺值      “错误: 选项 --offset 缺少值”（search.py:497-498）
-      重复      “错误: 选项 --offset 只能指定一次”（search.py:491-493）
+      缺值      “错误: 选项 --offset 缺少值”（search.py:506-507）
+      重复      “错误: 选项 --offset 只能指定一次”（search.py:500-502）
       格式非法  “错误: 选项 --offset 的值必须是非空的 ASCII 十进制
                 数字串: <取值>”（search.py:146-149）
       越界      “错误: 选项 --offset 的值超出范围 0-1000: <取值>”
@@ -322,8 +322,8 @@ search.py:187-195；0 不在范围内，按越界处理），错误行为一致�
 ------------------------
 
   - 分页不会省略候选坏文件的告警：偏移与限量在全部候选文件处理完毕
-    之后执行（search.py:595-599 注释），无法读取或无法按 UTF-8
-    解码的候选文件仍在阶段 D 逐文件告警（search.py:583-588，
+    之后执行（search.py:608-612 注释），无法读取或无法按 UTF-8
+    解码的候选文件仍在阶段 D 逐文件告警（search.py:596-601，
     经 _emit_stderr 写入标准错误），即使其结果随后被偏移全部跳过，
     或数量早已达到上限。对应既有用例：
       tests/test_offset.py
@@ -334,8 +334,8 @@ search.py:187-195；0 不在范围内，按越界处理），错误行为一致�
         CsvFormatTest.test_limit_does_not_omit_bad_file_warning_in_csv
 
   - 被路径或格式排除的文件仍不读取、不告警：格式筛选在收集候选时
-    完成（search.py:561-565），路径筛选的 continue（search.py:
-    574-577）发生在调用 _search_file（search.py:579，其中 289 行
+    完成（search.py:574-578），路径筛选的 continue（search.py:
+    574-577）发生在调用 _search_file（search.py:592，其中 289 行
     才 open）之前，因此被排除的文件不会被打开，无论是否指定
     --offset / --limit。对应既有用例：
       tests/test_offset.py
@@ -346,8 +346,8 @@ search.py:187-195；0 不在范围内，按越界处理），错误行为一致�
         AllLinesTest.test_excluded_file_is_not_read_or_warned_even_in_all_lines
 
   - 查询只读源文件，不生成索引或导出文件：整个流程只对候选文件做
-    一次只读打开（search.py:289），结果只写入标准输出
-    （search.py:610-611），不在磁盘上留下任何索引、缓存或导出
+    一次只读打开（search.py:291），结果只写入标准输出
+    （search.py:623-624），不在磁盘上留下任何索引、缓存或导出
     文件；分页选项不改变这一点。对应既有用例：
       tests/test_offset.py
         OffsetTest.test_offset_query_is_read_only_and_leaves_no_index

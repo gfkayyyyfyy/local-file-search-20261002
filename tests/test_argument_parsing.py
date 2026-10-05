@@ -9,10 +9,10 @@
 - 带值选项的值始终按字面消费：``--path-contains --ignore-case`` 中的
   ``--ignore-case`` 是路径片段而非开关，``--context-chars``、
   ``--file-type`` 的值看似开关时也先被取值、再按各自格式报错；
-- 除 ``--path-excludes`` 可重复指定（各次取值按出现顺序累积为元组）外，
-  其余十二个选项各自重复指定都报“只能指定一次”，十个带值选项缺紧随参数
-  都报“缺少值”，无法识别的记号报“无法识别的参数”，且一律报告扫描到的
-  第一个错误（多个错误并存时保持既有优先级）；
+- 除 ``--path-excludes`` 与 ``--and-keyword`` 可重复指定（各次取值按出现
+  顺序累积为元组）外，其余十一个选项各自重复指定都报“只能指定一次”，
+  十个带值选项缺紧随参数都报“缺少值”，无法识别的记号报“无法识别的
+  参数”，且一律报告扫描到的第一个错误（多个错误并存时保持既有优先级）；
 - ``--context-chars`` 只接受非空 ASCII 十进制数字串、允许任意数量前导零、
   范围 0-200；空白、正负号、小数、非 ASCII 数字、超范围均拒绝；
 - ``--limit`` 只接受非空 ASCII 十进制数字串、允许任意数量前导零、
@@ -64,7 +64,7 @@ USAGE_LINE = (
     "[--path-contains <路径片段>] [--path-excludes <路径片段>]... "
     "[--ignore-case] [--all-lines] "
     "[--context-chars <0-200>] [--file-type <txt|md>] "
-    "[--and-keyword <附加关键词>] [--not-keyword <排除关键词>] "
+    "[--and-keyword <附加关键词>]... [--not-keyword <排除关键词>] "
     "[--or-keyword <替代关键词>] "
     "[--limit <1-1000>] [--offset <0-1000>] [--format <json|csv>] "
     "[--show-column]"
@@ -90,7 +90,7 @@ class ParseArgsUnitTest(unittest.TestCase):
     def test_defaults_when_no_options(self) -> None:
         self.assertEqual(
             _parse_args(["some-dir", "target"]),
-            ("some-dir", "target", None, (), False, False, 30, None, None, None,
+            ("some-dir", "target", None, (), False, False, 30, None, (), None,
              None, None, 0, "json", False),
         )
 
@@ -127,14 +127,14 @@ class ParseArgsUnitTest(unittest.TestCase):
         self.assertEqual(
             parsed,
             ("some-dir", "TARGET", "notes/", ("private/",), True, True, 0, "txt",
-             "budget", "draft", "backup", 2, 1, "csv", True),
+             ("budget",), "draft", "backup", 2, 1, "csv", True),
         )
 
     def test_option_token_as_keyword_stays_literal(self) -> None:
         # 关键词恰为开关记号时，后面的位置才进入选项扫描。
         self.assertEqual(
             _parse_args(["some-dir", ALL_LINES_OPTION, IGNORE_CASE_OPTION]),
-            ("some-dir", ALL_LINES_OPTION, None, (), True, False, 30, None, None,
+            ("some-dir", ALL_LINES_OPTION, None, (), True, False, 30, None, (),
              None, None, None, 0, "json", False),
         )
 
@@ -142,7 +142,7 @@ class ParseArgsUnitTest(unittest.TestCase):
         # 关键词恰为 --file-type 时仍是字面文本，后面的参数才进入选项扫描。
         self.assertEqual(
             _parse_args(["some-dir", FILE_TYPE_OPTION, IGNORE_CASE_OPTION]),
-            ("some-dir", FILE_TYPE_OPTION, None, (), True, False, 30, None, None,
+            ("some-dir", FILE_TYPE_OPTION, None, (), True, False, 30, None, (),
              None, None, None, 0, "json", False),
         )
 
@@ -176,7 +176,6 @@ class ParseArgsUnitTest(unittest.TestCase):
             [CONTEXT_CHARS_OPTION, "1", CONTEXT_CHARS_OPTION, "2"],
             [PATH_OPTION, "a", PATH_OPTION, "b"],
             [FILE_TYPE_OPTION, "txt", FILE_TYPE_OPTION, "md"],
-            [AND_KEYWORD_OPTION, "a", AND_KEYWORD_OPTION, "b"],
             [NOT_KEYWORD_OPTION, "a", NOT_KEYWORD_OPTION, "b"],
             [OR_KEYWORD_OPTION, "a", OR_KEYWORD_OPTION, "b"],
             [LIMIT_OPTION, "1", LIMIT_OPTION, "2"],
@@ -206,6 +205,36 @@ class ParseArgsUnitTest(unittest.TestCase):
                  EXCLUDES_OPTION, "a"]
             )[3],
             ("a", "b", "a"),
+        )
+
+    def test_and_keyword_repeatable_and_accumulates_in_order(self) -> None:
+        # --and-keyword 可重复指定：各次取值按出现顺序累积为元组（位于元组
+        # 第 9 个元素，下标 8），重复相同值也不报错；未指定时为空元组。
+        self.assertEqual(
+            _parse_args(["d", "k", AND_KEYWORD_OPTION, "a"])[8],
+            ("a",),
+        )
+        self.assertEqual(
+            _parse_args(
+                ["d", "k", AND_KEYWORD_OPTION, "a", AND_KEYWORD_OPTION, "b",
+                 AND_KEYWORD_OPTION, "a"]
+            )[8],
+            ("a", "b", "a"),
+        )
+        # 可与其他选项任意交错。
+        parsed = _parse_args(
+            ["d", "k", AND_KEYWORD_OPTION, "a", IGNORE_CASE_OPTION,
+             CONTEXT_CHARS_OPTION, "0", AND_KEYWORD_OPTION, "--all-lines"]
+        )
+        self.assertEqual(parsed[8], ("a", "--all-lines"))
+        self.assertTrue(parsed[4])
+        self.assertFalse(parsed[5])
+        # 看似开关的取值仍是字面附加词，且缺紧随参数时报缺少值。
+        with self.assertRaises(ArgumentError) as caught:
+            _parse_args(["d", "k", AND_KEYWORD_OPTION, "a", AND_KEYWORD_OPTION])
+        self.assertEqual(
+            str(caught.exception),
+            f"错误: 选项 {AND_KEYWORD_OPTION} 缺少值",
         )
 
     def test_missing_value_raises_for_value_options(self) -> None:
@@ -546,7 +575,6 @@ class ArgumentParsingCliTest(unittest.TestCase):
             ),
             PATH_OPTION: (PATH_OPTION, "a", PATH_OPTION, "b"),
             FILE_TYPE_OPTION: (FILE_TYPE_OPTION, "txt", FILE_TYPE_OPTION, "md"),
-            AND_KEYWORD_OPTION: (AND_KEYWORD_OPTION, "a", AND_KEYWORD_OPTION, "b"),
             NOT_KEYWORD_OPTION: (NOT_KEYWORD_OPTION, "a", NOT_KEYWORD_OPTION, "b"),
             OR_KEYWORD_OPTION: (OR_KEYWORD_OPTION, "a", OR_KEYWORD_OPTION, "b"),
             LIMIT_OPTION: (LIMIT_OPTION, "1", LIMIT_OPTION, "2"),

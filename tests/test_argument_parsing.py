@@ -9,9 +9,10 @@
 - 带值选项的值始终按字面消费：``--path-contains --ignore-case`` 中的
   ``--ignore-case`` 是路径片段而非开关，``--context-chars``、
   ``--file-type`` 的值看似开关时也先被取值、再按各自格式报错；
-- 十三个选项各自重复指定都报“只能指定一次”，十个带值选项缺紧随参数都报
-  “缺少值”，无法识别的记号报“无法识别的参数”，且一律报告扫描到的第一个
-  错误（多个错误并存时保持既有优先级）；
+- 除 ``--path-excludes`` 可重复指定（各次取值按出现顺序累积为元组）外，
+  其余十二个选项各自重复指定都报“只能指定一次”，十个带值选项缺紧随参数
+  都报“缺少值”，无法识别的记号报“无法识别的参数”，且一律报告扫描到的
+  第一个错误（多个错误并存时保持既有优先级）；
 - ``--context-chars`` 只接受非空 ASCII 十进制数字串、允许任意数量前导零、
   范围 0-200；空白、正负号、小数、非 ASCII 数字、超范围均拒绝；
 - ``--limit`` 只接受非空 ASCII 十进制数字串、允许任意数量前导零、
@@ -60,7 +61,7 @@ FORMAT_OPTION = "--format"
 SHOW_COLUMN_OPTION = "--show-column"
 USAGE_LINE = (
     "用法: python -m local_search <目录> <关键词> "
-    "[--path-contains <路径片段>] [--path-excludes <路径片段>] "
+    "[--path-contains <路径片段>] [--path-excludes <路径片段>]... "
     "[--ignore-case] [--all-lines] "
     "[--context-chars <0-200>] [--file-type <txt|md>] "
     "[--and-keyword <附加关键词>] [--not-keyword <排除关键词>] "
@@ -89,7 +90,7 @@ class ParseArgsUnitTest(unittest.TestCase):
     def test_defaults_when_no_options(self) -> None:
         self.assertEqual(
             _parse_args(["some-dir", "target"]),
-            ("some-dir", "target", None, None, False, False, 30, None, None, None,
+            ("some-dir", "target", None, (), False, False, 30, None, None, None,
              None, None, 0, "json", False),
         )
 
@@ -125,7 +126,7 @@ class ParseArgsUnitTest(unittest.TestCase):
         )
         self.assertEqual(
             parsed,
-            ("some-dir", "TARGET", "notes/", "private/", True, True, 0, "txt",
+            ("some-dir", "TARGET", "notes/", ("private/",), True, True, 0, "txt",
              "budget", "draft", "backup", 2, 1, "csv", True),
         )
 
@@ -133,7 +134,7 @@ class ParseArgsUnitTest(unittest.TestCase):
         # 关键词恰为开关记号时，后面的位置才进入选项扫描。
         self.assertEqual(
             _parse_args(["some-dir", ALL_LINES_OPTION, IGNORE_CASE_OPTION]),
-            ("some-dir", ALL_LINES_OPTION, None, None, True, False, 30, None, None,
+            ("some-dir", ALL_LINES_OPTION, None, (), True, False, 30, None, None,
              None, None, None, 0, "json", False),
         )
 
@@ -141,7 +142,7 @@ class ParseArgsUnitTest(unittest.TestCase):
         # 关键词恰为 --file-type 时仍是字面文本，后面的参数才进入选项扫描。
         self.assertEqual(
             _parse_args(["some-dir", FILE_TYPE_OPTION, IGNORE_CASE_OPTION]),
-            ("some-dir", FILE_TYPE_OPTION, None, None, True, False, 30, None, None,
+            ("some-dir", FILE_TYPE_OPTION, None, (), True, False, 30, None, None,
              None, None, None, 0, "json", False),
         )
 
@@ -174,7 +175,6 @@ class ParseArgsUnitTest(unittest.TestCase):
             [ALL_LINES_OPTION, ALL_LINES_OPTION],
             [CONTEXT_CHARS_OPTION, "1", CONTEXT_CHARS_OPTION, "2"],
             [PATH_OPTION, "a", PATH_OPTION, "b"],
-            [EXCLUDES_OPTION, "a", EXCLUDES_OPTION, "b"],
             [FILE_TYPE_OPTION, "txt", FILE_TYPE_OPTION, "md"],
             [AND_KEYWORD_OPTION, "a", AND_KEYWORD_OPTION, "b"],
             [NOT_KEYWORD_OPTION, "a", NOT_KEYWORD_OPTION, "b"],
@@ -192,6 +192,21 @@ class ParseArgsUnitTest(unittest.TestCase):
                 self.assertEqual(
                     str(caught.exception), f"错误: 选项 {name} 只能指定一次"
                 )
+
+    def test_path_excludes_repeatable_and_accumulates_in_order(self) -> None:
+        # --path-excludes 可重复指定：各次取值按出现顺序累积为元组，
+        # 重复相同片段也不报错。
+        self.assertEqual(
+            _parse_args(["d", "k", EXCLUDES_OPTION, "a"])[3],
+            ("a",),
+        )
+        self.assertEqual(
+            _parse_args(
+                ["d", "k", EXCLUDES_OPTION, "a", EXCLUDES_OPTION, "b",
+                 EXCLUDES_OPTION, "a"]
+            )[3],
+            ("a", "b", "a"),
+        )
 
     def test_missing_value_raises_for_value_options(self) -> None:
         for name in (
@@ -530,7 +545,6 @@ class ArgumentParsingCliTest(unittest.TestCase):
                 "2",
             ),
             PATH_OPTION: (PATH_OPTION, "a", PATH_OPTION, "b"),
-            EXCLUDES_OPTION: (EXCLUDES_OPTION, "a", EXCLUDES_OPTION, "b"),
             FILE_TYPE_OPTION: (FILE_TYPE_OPTION, "txt", FILE_TYPE_OPTION, "md"),
             AND_KEYWORD_OPTION: (AND_KEYWORD_OPTION, "a", AND_KEYWORD_OPTION, "b"),
             NOT_KEYWORD_OPTION: (NOT_KEYWORD_OPTION, "a", NOT_KEYWORD_OPTION, "b"),

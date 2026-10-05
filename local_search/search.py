@@ -12,6 +12,7 @@
                            [--limit <1-1000>]
                            [--offset <0-1000>]
                            [--format <json|csv>]
+                           [--show-column]
 
 仅依赖 Python 3 标准库，离线运行，只读扫描源文件，不生成索引。
 """
@@ -37,6 +38,7 @@ OR_KEYWORD_OPTION = "--or-keyword"
 LIMIT_OPTION = "--limit"
 OFFSET_OPTION = "--offset"
 FORMAT_OPTION = "--format"
+SHOW_COLUMN_OPTION = "--show-column"
 MIN_LIMIT = 1
 MAX_LIMIT = 1000
 MIN_OFFSET = 0
@@ -52,7 +54,8 @@ USAGE = (
     "[--context-chars <0-200>] [--file-type <txt|md>] "
     "[--and-keyword <附加关键词>] [--not-keyword <排除关键词>] "
     "[--or-keyword <替代关键词>] "
-    "[--limit <1-1000>] [--offset <0-1000>] [--format <json|csv>]"
+    "[--limit <1-1000>] [--offset <0-1000>] [--format <json|csv>] "
+    "[--show-column]"
 )
 
 # 仅折叠 ASCII 的 A-Z 到 a-z；translate 按码点一一映射，不产生多字符展开
@@ -277,6 +280,7 @@ def _search_file(
     and_keyword: str | None = None,
     not_keyword: str | None = None,
     or_keyword: str | None = None,
+    show_column: bool = False,
 ) -> list[dict]:
     """在单个文件中查找单行命中，返回结果项列表（无命中返回空列表）。
 
@@ -314,6 +318,13 @@ def _search_file(
     context_chars 为命中关键词前后各保留的码点数（按 Unicode 码点计，
     中文与补充平面字符各算一个；关键词自身长度不计入额度），到行首或行尾
     停止，不借用相邻行也不添加省略号。为 0 时片段只保留完整命中关键词。
+
+    show_column 为真时，每项额外携带 ``column``：片段围绕的命中起点在当前
+    源文件行内的列号，按 Unicode 码点从 1 开始计数（中文、补充平面字符与
+    制表符各算一码点，组合字符按实际码点数累计），与裁剪后的片段位置、
+    字节数及显示宽度无关。忽略大小写时的 ASCII 折叠按码点一一映射，不移动
+    命中位置，因此列号对源文本与检索视图一致；column 与 snippet 始终指向
+    同一命中，不随 context_chars、排序或分页改变。
     """
     with open(path, "r", encoding="utf-8") as handle:
         content = handle.read()
@@ -342,12 +353,14 @@ def _search_file(
         position, hit_length = match
         start = max(0, position - context_chars)
         end = min(len(line), position + hit_length + context_chars)
-        hits.append(
-            {
-                "line": line_number,
-                "snippet": line[start:end],
-            }
-        )
+        hit = {
+            "line": line_number,
+            "snippet": line[start:end],
+        }
+        if show_column:
+            # position 是源行内的码点下标（从 0 起），列号从 1 起。
+            hit["column"] = position + 1
+        hits.append(hit)
         if not all_lines:
             break
     return hits
@@ -364,24 +377,26 @@ def _csv_field(value: str) -> str:
     return value
 
 
-def _render_csv(results: list[dict]) -> bytes:
+def _render_csv(results: list[dict], show_column: bool = False) -> bytes:
     """把结果项序列化为不带 BOM 的 UTF-8 CSV 字节串。
 
-    表头固定为 ``path,line,snippet``，每个命中项一条记录，每条记录（含
-    表头）以 CRLF 结束；无命中时只输出表头及其 CRLF。列值沿用结果项中的
-    相对路径、行号与片段，不重新加工。
+    表头固定为 ``path,line,snippet``；show_column 为真时追加 ``column``
+    列，表头变为 ``path,line,snippet,column``，列值为十进制行内列号。
+    每个命中项一条记录，每条记录（含表头）以 CRLF 结束；无命中时只输出
+    表头及其 CRLF。列值沿用结果项中的相对路径、行号、片段与列号，不重新
+    加工。
     """
-    lines = ["path,line,snippet"]
+    header = "path,line,snippet,column" if show_column else "path,line,snippet"
+    lines = [header]
     for item in results:
-        lines.append(
-            ",".join(
-                (
-                    _csv_field(item["path"]),
-                    str(item["line"]),
-                    _csv_field(item["snippet"]),
-                )
-            )
-        )
+        fields = [
+            _csv_field(item["path"]),
+            str(item["line"]),
+            _csv_field(item["snippet"]),
+        ]
+        if show_column:
+            fields.append(str(item["column"]))
+        lines.append(",".join(fields))
     return ("\r\n".join(lines) + "\r\n").encode("utf-8")
 
 
@@ -407,7 +422,7 @@ class _OptionSpec:
         self.validate = validate
 
 
-# 十二个选项共用同一套规则（至多出现一次；带值选项缺值即报错；取值按字面
+# 十三个选项共用同一套规则（至多出现一次；带值选项缺值即报错；取值按字面
 # 消费），差异只在“是否带值”“缺省值”和“取值校验”三处，集中在本表声明。
 # 新增选项时只需在此追加一行，无需改动扫描循环。
 _OPTION_SPECS = (
@@ -448,6 +463,7 @@ _OPTION_SPECS = (
         default="json",
         validate=_parse_format,
     ),
+    _OptionSpec(SHOW_COLUMN_OPTION, takes_value=False, default=False),
 )
 _OPTION_BY_TOKEN = {spec.name: spec for spec in _OPTION_SPECS}
 
@@ -456,7 +472,7 @@ def _parse_args(
     args: list[str],
 ) -> tuple[
     str, str, str | None, str | None, bool, bool, int, str | None, str | None,
-    str | None, str | None, int | None, int, str,
+    str | None, str | None, int | None, int, str, bool,
 ]:
     """解析参数：恰好两个位置参数，其后可出现选项。
 
@@ -465,7 +481,8 @@ def _parse_args(
       即使看起来像选项（包括 ``--path-excludes``、``--ignore-case``、
       ``--all-lines``、``--context-chars``、``--file-type``、
       ``--and-keyword``、``--not-keyword``、``--or-keyword``、
-      ``--limit``、``--offset``、``--format``）也仍是字面值；
+      ``--limit``、``--offset``、``--format``、``--show-column``）也仍是
+      字面值；
     - ``--path-excludes <片段>``：路径排除片段，语义与取值规则同
       ``--path-contains``；文件相对路径包含该片段即被排除，不读取其内容；
     - ``--ignore-case``：无取值的开关，可重复指定即报错；
@@ -505,6 +522,12 @@ def _parse_args(
       ``json``，输出原有 JSON 数组，``csv`` 时输出表头为
       ``path,line,snippet`` 的 CSV 文本；格式选择只影响序列化，不改变
       检索、排序与 ``--limit`` 截断行为；缺值、重复指定或非法取值均报错。
+    - ``--show-column``：无取值的开关，开启后 JSON 每项新增整数 ``column``
+      字段、CSV 在原三列后追加 ``column`` 列（表头为
+      ``path,line,snippet,column``），列值为命中起点在源文件行内按
+      Unicode 码点从 1 开始计数的列号；未开启时输出与既有格式完全一致。
+      同名文本作为关键词或其他选项的取值时仍按字面文本处理，不开启列号；
+      可重复指定即报错。
 
     选项只允许出现在两个位置参数之后，相互先后顺序不限。不使用通用
     选项解析：两个位置参数按字面取值，因此以连字符开头的关键词（即使恰好
@@ -557,6 +580,7 @@ def _parse_args(
         values[LIMIT_OPTION],
         values[OFFSET_OPTION],
         values[FORMAT_OPTION],
+        SHOW_COLUMN_OPTION in seen,
     )
 
 
@@ -579,6 +603,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             limit,
             offset,
             output_format,
+            show_column,
         ) = _parse_args(args)
     except ArgumentError as exc:
         return _fail(str(exc))
@@ -632,7 +657,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             hits = _search_file(
                 path, keyword, ignore_case, all_lines, context_chars, and_keyword,
-                not_keyword, or_keyword,
+                not_keyword, or_keyword, show_column,
             )
         except UnicodeDecodeError as exc:
             _emit_stderr(f"警告: 跳过文件 {rel}: 无法按 UTF-8 解码 ({exc})")
@@ -641,7 +666,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             _emit_stderr(f"警告: 跳过文件 {rel}: 无法读取 ({exc})")
             continue
         for hit in hits:
-            results.append({"path": rel, "line": hit["line"], "snippet": hit["snippet"]})
+            item = {"path": rel, "line": hit["line"], "snippet": hit["snippet"]}
+            if show_column:
+                item["column"] = hit["column"]
+            results.append(item)
 
     # 先按路径的区分大小写 Unicode 码点序，同一路径再按行号递增。
     results.sort(key=lambda item: (item["path"], item["line"]))
@@ -658,7 +686,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # 格式选择只影响序列化：检索、排序与截断在两种格式下完全一致。
     if output_format == "csv":
-        payload = _render_csv(results)
+        payload = _render_csv(results, show_column)
     else:
         payload = json.dumps(results, ensure_ascii=False).encode("utf-8") + b"\n"
     sys.stdout.buffer.write(payload)

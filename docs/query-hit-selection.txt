@@ -1,0 +1,373 @@
+命中选择说明：候选命中怎样决定 snippet 与 --show-column 的 column
+================================================================
+
+本文只描述现有实现的既有行为，不新增功能。所有结论均可按给出的
+“相对路径:行号 / 函数名”与源码逐条核对；涉及的实现文件只有：
+
+  - local_search/search.py        （全部检索逻辑）
+  - local_search/__main__.py      （命令行入口）
+  - local_search/__init__.py      （公开入口导出）
+
+行号基于当前仓库版本；如源码变动，请以函数名与引用的代码文本为准重新定位。
+
+
+0. 命令入口与公开入口
+----------------------
+
+命令行入口：
+
+    python -m local_search <目录> <关键词> [选项...]
+
+  - local_search/__main__.py:5-6：__main__ 保护块内以
+    sys.exit(main(sys.argv[1:])) 启动，main 的返回值即进程退出码。
+
+公开入口：
+
+  - local_search/__init__.py:3 声明 __all__ = ["main"]，
+    local_search/__init__.py:5 从 .search 导入 main，
+  - 即 local_search.main，定义于 local_search/search.py:606
+    （函数 main(argv=None) -> int，local_search/search.py:606-713）。
+
+local_search.main 接受与命令行等价的参数列表（list[str]），返回整数
+状态码并向标准输出写入结果；它本身不调用 sys.exit，成功处理完查询
+返回 0（local_search/search.py:713），各类失败经 _fail 返回 2
+（_fail 定义于 local_search/search.py:86-88：先把消息写入标准错误，
+再 return 2）。因此两种入口观察到的退出码、标准输出、标准错误完全
+一致。对应既有用例：
+
+  tests/test_show_column.py
+    ShowColumnTest.test_main_entry_matches_cli
+  tests/test_context_chars.py
+    ContextCharsTest.test_long_values_via_main_entrypoint_share_behavior
+
+
+1. 命中选择在查询流程中的位置
+------------------------------
+
+main（local_search/search.py:606-713）内部按顺序执行：参数解析
+（_parse_args，search.py:478-603）、空白值与目录检查、文件筛选、
+逐文件检索、排序、偏移与限量、序列化输出。snippet 与 column 的取值
+全部在“逐文件检索”阶段确定，之后的排序、分页与格式选择都不再改变
+它们：
+
+  - 每个通过筛选的文件调用 _search_file（search.py:274-366），
+    该函数先一次性只读打开并按 UTF-8 解码整个文件
+    （search.py:329-330），再逐行做命中判定；
+  - 每行的命中判定由 _match_line（search.py:232-271）完成，返回
+    (命中位置, 命中词长度) 或 None；
+  - 命中位置与词长换算出 snippet（search.py:354-359），开启
+    --show-column 时再算出 column（search.py:360-362）；
+  - 结果项在 main 中补上 path 后汇总（search.py:687-691），按
+    (path, line) 排序（search.py:694），最后序列化（JSON 在
+    search.py:710，CSV 在 _render_csv，search.py:380-400）。
+
+因此 column 与 snippet 始终指向同一命中，不随 --context-chars、
+排序或 --offset/--limit 改变。对应既有用例：
+
+  tests/test_show_column.py
+    ShowColumnTest.test_column_independent_of_context_chars
+    ShowColumnTest.test_column_stable_under_offset_and_limit
+
+
+2. 候选命中的选择：主关键词与 --or-keyword
+-------------------------------------------
+
+主关键词与 --or-keyword 的替代词都按“同一行内的连续字面子串”比较：
+不拆词、不解释正则或通配符，词内首尾空格保留。判定在 _match_line
+（search.py:232-271）：
+
+  - search.py:257：main_position = search_line.find(keyword)，
+    取主关键词在行内的最左出现位置；
+  - search.py:258：or_position = search_line.find(or_keyword)，
+    取替代词的最左出现位置（未指定 --or-keyword 时记为 -1）；
+  - search.py:259-260：两词都未出现（均为 -1）时该行不命中，
+    返回 None；
+  - search.py:261-266：两词均有命中时选择起点最靠左的一次——
+    主关键词位置不大于替代词位置（main_position <= or_position）
+    时选主关键词，否则选替代词；起点相同（含两词相同或前缀重叠）
+    时选主关键词。返回的词长按所选词计算（len(keyword) 或
+    len(or_keyword)），片段长度因此由所选词决定。
+
+未指定 --or-keyword 时只按主关键词的最左命中判定，与既有行为一致。
+对应既有用例：
+
+  tests/test_or_keyword.py
+    OrKeywordTest.test_snippet_uses_earliest_start_among_both_keywords
+    OrKeywordTest.test_same_start_position_prefers_main_keyword
+    OrKeywordTest.test_snippet_length_follows_chosen_keyword
+    OrKeywordTest.test_or_keyword_is_literal_substring
+  tests/test_show_column.py
+    ShowColumnTest.test_or_keyword_leftmost_wins_and_tie_prefers_main
+  tests/test_keyword_literal.py（字面子串语义的专项回归）
+
+
+3. 每个文件返回哪些行
+----------------------
+
+  - 默认（不加 --all-lines）：每个文件只返回首个合格行。_search_file
+    在收集到首个命中后立即 break（search.py:364-365），该行之后的
+    合格行不再产生结果项。
+  - --all-lines：逐行返回，每个合格行各产生一项，同一文件内按行号
+    递增排列（search.py:342 的逐行循环不中断）。
+  - 同一行关键词重复出现仍只有一项：_match_line 对每行至多返回一个
+    (位置, 词长)，每行至多向结果追加一项（search.py:356-363），
+    片段与列号都以该行最左侧的所选命中为准。
+
+对应既有用例：
+
+  tests/test_all_lines.py
+    AllLinesTest.test_every_matching_line_returned_in_line_order
+    AllLinesTest.test_same_line_multiple_hits_yield_one_item_with_leftmost_snippet
+  tests/test_show_column.py
+    ShowColumnTest.test_column_points_at_leftmost_hit_of_first_line_by_default
+    ShowColumnTest.test_all_lines_repeated_hit_per_line_returns_one_item
+  tests/test_or_keyword.py
+    OrKeywordTest.test_acceptance_default_returns_earliest_qualified_line
+    OrKeywordTest.test_acceptance_all_lines_returns_each_qualified_line
+    OrKeywordTest.test_both_keywords_on_one_line_still_one_item
+
+
+4. --ignore-case：仅折叠 ASCII，片段保留源文大小写
+----------------------------------------------------
+
+  - 折叠只把 ASCII 的 A-Z 映射为 a-z：映射表 _ASCII_UPPER_TO_LOWER
+    （search.py:63-65）按码点一一对应，不产生多字符展开（ß 不会
+    变成 ss），也不影响 É 等非 ASCII 字符；折叠函数 _ascii_lower
+    定义于 search.py:99-101。
+  - 命中判定统一在“检索视图”上进行：开启 --ignore-case 时，关键词
+    与行文本都先经 _ascii_lower 折叠（关键词在 search.py:331-340，
+    行在 search.py:346），再交给同一个 _match_line；未开启时直接
+    用原文。两种模式的判定逻辑完全一致。
+  - 折叠按码点一一映射，不改变词长、不移动命中位置，因此定位结果
+    对源文本同样适用；定位之后，snippet 始终取自源文本行
+    （search.py:358 的 line[start:end]），保留原始大小写，column
+    也对源行成立。
+
+对应既有用例：
+
+  tests/test_ignore_case.py
+    IgnoreCaseTest.test_flag_matches_ascii_case_variants_with_original_case_snippet
+    IgnoreCaseTest.test_non_ascii_letters_are_not_folded
+    IgnoreCaseTest.test_sharp_s_is_not_expanded_to_ss
+  tests/test_or_keyword.py
+    OrKeywordTest.test_ignore_case_folds_both_keywords_ascii_only
+    OrKeywordTest.test_snippet_keeps_source_case_and_stays_on_line
+  tests/test_context_chars.py
+    ContextCharsTest.test_snippet_taken_from_source_preserving_case
+
+
+5. 片段上下文与列号的计数规则
+------------------------------
+
+片段（snippet）：
+
+  - 上下文只取当前行，不借用相邻行，也不添加省略号；
+  - 默认在命中词前后各保留 30 个 Unicode 码点
+    （DEFAULT_CONTEXT_CHARS = 30，search.py:27），由
+    --context-chars <0-200> 调整；关键词自身长度不计入额度；
+  - 裁剪在 search.py:354-355：start = max(0, position - context)，
+    end = min(len(line), position + hit_length + context)，到行首
+    或行尾停止；码点计数下中文与补充平面字符各算一个；
+  - --context-chars 0 时 start 即命中起点、end 即命中终点，片段只
+    保留完整命中词。
+
+列号（column，仅 --show-column 开启时输出）：
+
+  - 取值是片段围绕的命中起点在当前源文件行内的列号，从 1 开始按
+    Unicode 码点计数（search.py:360-362：position 是从 0 起的码点
+    下标，列号为 position + 1）；
+  - 中文、补充平面字符（如 😀）与制表符各算一个码点，组合字符
+    （如 e + 组合重音符）按实际码点数累计；
+  - 与片段裁剪后的位置、UTF-8 字节数及终端显示宽度都无关——列号
+    在裁剪之前由源行位置直接算出，--context-chars 取任何值都不
+    改变它。
+
+对应既有用例：
+
+  tests/test_first_hit_snippet.py
+    FirstHitSnippetTest.test_first_occurrence_wins_and_suffix_context_capped_at_30
+    FirstHitSnippetTest.test_snippet_context_counts_unicode_code_points
+    FirstHitSnippetTest.test_adjacent_lines_are_not_borrowed_as_context
+  tests/test_context_chars.py
+    ContextCharsTest.test_default_remains_30_code_points
+    ContextCharsTest.test_astral_and_cjk_each_count_as_one_code_point
+    ContextCharsTest.test_keyword_length_not_counted_in_budget
+    ContextCharsTest.test_leftmost_hit_anchors_snippet
+    ContextCharsTest.test_clipping_stops_at_line_boundaries
+    ContextCharsTest.test_acceptance_context_chars_0_all_lines
+  tests/test_show_column.py
+    ShowColumnTest.test_column_counts_code_points
+    ShowColumnTest.test_column_independent_of_context_chars
+
+
+6. 附加词与排除词只影响行的合格性
+----------------------------------
+
+--and-keyword 与 --not-keyword 只判断整行是否合格，不改变所选命中
+的位置，也不为展示它们扩大片段：
+
+  - --and-keyword：同一行还须包含附加关键词（位置不限，可与主
+    关键词的命中重叠或共用文字），否则该行按未命中处理
+    （_match_line，search.py:267-268）；
+  - --not-keyword：完整当前行内任何位置出现排除关键词（包括片段
+    之外）即排除该行（search.py:269-270）；排除词在其他行出现不
+    影响本行；
+  - 两个判断都发生在命中位置选定之后，且都不修改返回的
+    (位置, 词长)，因此 snippet 与 column 仍只由第 2 节的选择规则
+    决定。
+
+对应既有用例：
+
+  tests/test_or_keyword.py
+    OrKeywordTest.test_and_keyword_still_required_on_same_line
+    OrKeywordTest.test_not_keyword_excludes_line_anywhere
+  tests/test_and_keyword.py、tests/test_not_keyword.py（专项回归）
+
+
+7. 固定资料演示：--or-keyword 与 --all-lines 下的 snippet 与 column
+--------------------------------------------------------------------
+
+演示目录中只有一个 UTF-8 文件 a.txt，两行原文如下，均以 LF 结束：
+
+  第 1 行：前😀TAR xx TARGET
+  第 2 行：中Target TAR
+
+第一次查询（默认模式）：
+
+    python -m local_search <演示目录> target --or-keyword tar \
+        --ignore-case --context-chars 0 --show-column
+
+  选择过程（--ignore-case 先把行与两词都按 ASCII 折叠）：
+
+  - 第 1 行折叠后为 “前😀tar xx target”：主关键词 "target" 最左
+    出现在码点下标 9，替代词 "tar" 最左出现在码点下标 2；替代词
+    起点更靠左，选中替代词（_match_line，search.py:261-266），
+    词长按 "tar" 计为 3。--context-chars 0 使片段只保留完整命中
+    词，取自源文本保留原大小写，snippet 为 "TAR"；列号为
+    2 + 1 = 3（“前” 第 1 列、“😀” 第 2 列、“T” 第 3 列，
+    中文与补充平面字符各算一码点）。
+  - 第 2 行折叠后为 “中target tar”：主关键词与替代词都在码点
+    下标 1 起点相同，按规则选主关键词，本行也合格；但默认模式
+    每文件只返回首个合格行，_search_file 在第 1 行命中后即
+    break（search.py:364-365），第 2 行不产生结果项。
+
+  预期：
+    退出码：0
+    标准输出（JSON，末尾一个换行）：
+      [{"path": "a.txt", "line": 1, "snippet": "TAR", "column": 3}]
+    标准错误：空
+
+第二次查询（仅追加 --all-lines）：
+
+    python -m local_search <演示目录> target --or-keyword tar \
+        --ignore-case --context-chars 0 --show-column --all-lines
+
+  逐行模式下第 1 行命中后不再停止，第 2 行也产生一项：主关键词
+  "target" 与替代词 "tar" 起点相同（码点下标 1），选主关键词，
+  词长按 "target" 计为 6，snippet 取自源文本为 "Target"，列号为
+  1 + 1 = 2。同一文件的两项按行号递增排列。
+
+  预期：
+    退出码：0
+    标准输出（JSON，末尾一个换行）：
+      [{"path": "a.txt", "line": 1, "snippet": "TAR", "column": 3}, {"path": "a.txt", "line": 2, "snippet": "Target", "column": 2}]
+    标准错误：空
+
+两次查询的命令行只差一个 --all-lines，差异全部来自“每个文件返回
+哪些行”的规则（第 3 节）；每项内部的 snippet 与 column 选择规则
+完全相同。对应既有用例（断言方式相同）：
+
+  tests/test_show_column.py
+    ShowColumnTest.test_demo_scenario_json_columns
+    ShowColumnTest.test_demo_scenario_option_order_invariance
+    ShowColumnTest.test_or_keyword_leftmost_wins_and_tie_prefers_main
+  tests/test_or_keyword.py
+    OrKeywordTest.test_acceptance_default_returns_earliest_qualified_line
+    OrKeywordTest.test_acceptance_all_lines_returns_each_qualified_line
+
+
+8. 边界与错误行为
+------------------
+
+  - 未开启 --show-column 时没有 column 字段：结果项只含 path、
+    line、snippet（search.py:688-691 中 column 仅在 show_column
+    为真时加入；JSON 与 CSV 输出都与既有格式完全一致）。对应既有
+    用例：
+      tests/test_show_column.py
+        ShowColumnTest.test_without_flag_output_unchanged
+
+  - 无命中时输出 [] 并返回 0：结果序列为空仍走正常输出路径，
+    JSON 为空数组 [] 加一个换行（json.dumps，search.py:710），
+    退出码 0（search.py:713），标准错误为空；这不是错误。对应
+    既有用例：
+      tests/test_show_column.py
+        ShowColumnTest.test_no_hit_outputs_empty_results
+      tests/test_or_keyword.py
+        OrKeywordTest.test_no_match_returns_empty_json_array
+
+  - 重复指定 --show-column 在扫描前返回 2：该开关不可重复
+    （_OPTION_SPECS，search.py:473；重复检查在 _parse_args 的
+    search.py:574-575），参数解析在目录扫描之前完成，因此：
+      退出码 2（经 _fail，search.py:86-88）；
+      标准输出完全为空（结果输出在 search.py:711，所有出错路径
+        都在其之前 return）；
+      标准错误为一行 “错误: 选项 --show-column 只能指定一次”，
+        包含该选项名与“只能指定一次”；
+      不输出异常堆栈。
+    对应既有用例：
+      tests/test_show_column.py
+        ShowColumnTest.test_duplicate_flag_fails_before_scan
+
+  - 同名文本作为关键词或其他选项的取值时仍按字面文本处理，不开启
+    列号（两个位置参数按字面取值，带值选项的取值按字面消费）。
+    对应既有用例：
+      tests/test_show_column.py
+        ShowColumnTest.test_token_as_keyword_and_value_stays_literal
+
+  - 源文件始终只读，查询不生成索引或导出文件：整个流程只对候选
+    文件做一次只读打开（search.py:329），结果只写入标准输出
+    （search.py:711-712），不在磁盘上留下任何索引、缓存或导出
+    文件。对应既有用例：
+      tests/test_or_keyword.py
+        OrKeywordTest.test_query_is_read_only_and_leaves_no_index
+      tests/test_first_hit_snippet.py
+        FirstHitSnippetTest.test_query_leaves_no_index_files_and_keeps_sources_intact
+
+
+9. 结论 -> 源码 -> 用例 核对索引
+---------------------------------
+
+结论                            源码（local_search/search.py）       对应用例（tests/）
+------------------------------  -----------------------------------  ----------------------------------------
+主/替代词按同行连续字面子串     _match_line 232-271；find 257-258   test_or_keyword.py 290；
+                                                                    test_keyword_literal.py
+两词均有命中选起点最左，        选择分支 261-266                     test_or_keyword.py 171、198、212；
+同起点选主词，词长定片段长度                                          test_show_column.py 240
+默认每文件仅首个合格行          break 364-365                        test_or_keyword.py 105；
+                                                                    test_show_column.py 213
+--all-lines 逐行各一项          逐行循环 342-363                     test_or_keyword.py 118；
+                                                                    test_all_lines.py 174
+同行重复命中仍只有一项          单项追加 356-363                     test_all_lines.py 138；
+                                                                    test_show_column.py 225
+--ignore-case 仅折叠 ASCII      映射表 63-65；_ascii_lower 99-101； test_ignore_case.py 120、179、203；
+片段保留源文大小写              折叠 331-346；片段取源行 358         test_or_keyword.py 226、259
+上下文仅当前行，默认前后各      DEFAULT_CONTEXT_CHARS 27；          test_first_hit_snippet.py 79、111、231；
+30 码点，为 0 时仅完整命中词    裁剪 354-355                         test_context_chars.py 148、166、301、314
+列号从 1 起按源行码点计数，     column 计算 360-362                  test_show_column.py 184、198
+与裁剪、字节数、显示宽度无关
+附加词/排除词只判整行合格性，   and 分支 267-268；not 分支          test_or_keyword.py 324、347
+不改所选命中位置                269-270
+未开启 --show-column 无 column  条件加入 360-362、689-690            test_show_column.py 160
+无命中输出 [] 并返回 0          空结果序列化 710；return 0 713       test_show_column.py 277；
+                                                                    test_or_keyword.py 501
+重复 --show-column 扫描前       规格表 473；重复检查 574-575；       test_show_column.py 289
+返回 2，stdout 空，stderr 含    _fail 86-88
+选项名与“只能指定一次”
+main 入口等价、只读不留文件     main 606-713；只读 open 329；       test_show_column.py 319；
+                                写 stdout 711-712                   test_or_keyword.py 517
+
+
+附：本次交付不改动任何源码与测试，不改变现有接口、输出格式与源文件
+只读行为；其余公开行为（路径筛选、--file-type、--and-keyword、
+--not-keyword、--limit、--offset、--format、符号链接跳过、UTF-8
+整文件解码等）保持原样，未在本文展开。

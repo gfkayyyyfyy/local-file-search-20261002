@@ -8,6 +8,7 @@
                            [--file-type <txt|md>]
                            [--and-keyword <附加关键词>]
                            [--not-keyword <排除关键词>]
+                           [--or-keyword <替代关键词>]
                            [--limit <1-1000>]
                            [--offset <0-1000>]
                            [--format <json|csv>]
@@ -32,6 +33,7 @@ CONTEXT_CHARS_OPTION = "--context-chars"
 FILE_TYPE_OPTION = "--file-type"
 AND_KEYWORD_OPTION = "--and-keyword"
 NOT_KEYWORD_OPTION = "--not-keyword"
+OR_KEYWORD_OPTION = "--or-keyword"
 LIMIT_OPTION = "--limit"
 OFFSET_OPTION = "--offset"
 FORMAT_OPTION = "--format"
@@ -49,6 +51,7 @@ USAGE = (
     "[--ignore-case] [--all-lines] "
     "[--context-chars <0-200>] [--file-type <txt|md>] "
     "[--and-keyword <附加关键词>] [--not-keyword <排除关键词>] "
+    "[--or-keyword <替代关键词>] "
     "[--limit <1-1000>] [--offset <0-1000>] [--format <json|csv>]"
 )
 
@@ -226,28 +229,43 @@ def _parse_format(raw: str) -> str:
 def _match_line(
     search_line: str,
     keyword: str,
+    or_keyword: str | None,
     and_keyword: str | None,
     not_keyword: str | None,
-) -> int:
-    """在单行检索视图中做命中判定，返回主关键词最左侧命中的位置，未命中返回 -1。
+) -> tuple[int, int] | None:
+    """在单行检索视图中做命中判定，返回 (命中位置, 命中词长度)，未命中返回 None。
 
-    ``search_line`` 是已经按需折叠大小写的行文本，``keyword``、``and_keyword``
-    与 ``not_keyword`` 是与之对应的关键词形式；区分大小写与忽略大小写两个分支
-    只在进入本函数前如何构造这些文本上不同，判定逻辑完全一致。
+    ``search_line`` 是已经按需折叠大小写的行文本，``keyword``、``or_keyword``、
+    ``and_keyword`` 与 ``not_keyword`` 是与之对应的关键词形式；区分大小写与
+    忽略大小写两个分支只在进入本函数前如何构造这些文本上不同，判定逻辑完全
+    一致。忽略大小写时的 ASCII 折叠按码点一一映射，不改变词长，因此返回的
+    长度对源文本与检索视图同样适用。
+
+    or_keyword 不为 None 时，行内包含主关键词或替代关键词之一即通过关键词
+    条件；两词都出现时，片段围绕起始位置最小的命中，起始位置相同（含两词
+    相同或前缀重叠）时选主关键词，返回的长度按所选词计算。or_keyword 为
+    None 时只按主关键词判定，与既有行为一致。
 
     and_keyword 不为 None 时，同一行还须包含该附加关键词（位置不限，可与主
     关键词的命中重叠或共用文字），否则按未命中处理。not_keyword 不为 None 时，
     完整当前行内任何位置出现该排除关键词（包括片段之外）即排除该行，按未命中
     处理；排除词在其他行出现不影响本行。
     """
-    position = search_line.find(keyword)
-    if position == -1:
-        return -1
+    main_position = search_line.find(keyword)
+    or_position = search_line.find(or_keyword) if or_keyword is not None else -1
+    if main_position == -1 and or_position == -1:
+        return None
+    if or_keyword is None or or_position == -1 or (
+        main_position != -1 and main_position <= or_position
+    ):
+        position, length = main_position, len(keyword)
+    else:
+        position, length = or_position, len(or_keyword)
     if and_keyword is not None and and_keyword not in search_line:
-        return -1
+        return None
     if not_keyword is not None and not_keyword in search_line:
-        return -1
-    return position
+        return None
+    return position, length
 
 
 def _search_file(
@@ -258,6 +276,7 @@ def _search_file(
     context_chars: int = DEFAULT_CONTEXT_CHARS,
     and_keyword: str | None = None,
     not_keyword: str | None = None,
+    or_keyword: str | None = None,
 ) -> list[dict]:
     """在单个文件中查找单行命中，返回结果项列表（无命中返回空列表）。
 
@@ -281,6 +300,13 @@ def _search_file(
     ignore_case 同时作用于排除关键词，仍只折叠 ASCII 字母。排除只影响行的
     合格性，不改变片段的取法。
 
+    or_keyword 不为 None 时，行内包含主关键词或替代关键词之一即满足关键词
+    条件：替代词同样按连续字面子串匹配（不拆词、不解释正则或通配符，首尾
+    空格保留），每行独立判断，两词出现在同一行或分别出现都各只产生一项。
+    ignore_case 同时作用于替代关键词，仍只折叠 ASCII 字母。片段围绕两词
+    起始位置最小的命中，起始位置相同时选主关键词，片段长度按所选词计算；
+    未提供 or_keyword 时仍只围绕主关键词最左侧命中，与既有行为一致。
+
     all_lines 为假（默认）时只返回按行号、行内位置确定的首个命中；
     all_lines 为真时每个命中行各返回一项，按行号递增排列。同一行多次出现
     关键词仍只产生一项，片段以该行最左侧命中为中心。
@@ -298,17 +324,24 @@ def _search_file(
     folded_not_keyword = (
         _ascii_lower(not_keyword) if ignore_case and not_keyword is not None else not_keyword
     )
+    folded_or_keyword = (
+        _ascii_lower(or_keyword) if ignore_case and or_keyword is not None else or_keyword
+    )
     hits: list[dict] = []
     for line_number, raw_line in enumerate(content.split("\n"), start=1):
         line = raw_line.rstrip("\r\n")
         # 命中判定统一在“检索视图”上进行：忽略大小写时为 ASCII 折叠后的行，
         # 否则为原行；两种模式共用 _match_line 的同一套判定。
         search_line = _ascii_lower(line) if ignore_case else line
-        position = _match_line(search_line, folded_keyword, folded_and_keyword, folded_not_keyword)
-        if position == -1:
+        match = _match_line(
+            search_line, folded_keyword, folded_or_keyword,
+            folded_and_keyword, folded_not_keyword,
+        )
+        if match is None:
             continue
+        position, hit_length = match
         start = max(0, position - context_chars)
-        end = min(len(line), position + len(keyword) + context_chars)
+        end = min(len(line), position + hit_length + context_chars)
         hits.append(
             {
                 "line": line_number,
@@ -374,7 +407,7 @@ class _OptionSpec:
         self.validate = validate
 
 
-# 十一个选项共用同一套规则（至多出现一次；带值选项缺值即报错；取值按字面
+# 十二个选项共用同一套规则（至多出现一次；带值选项缺值即报错；取值按字面
 # 消费），差异只在“是否带值”“缺省值”和“取值校验”三处，集中在本表声明。
 # 新增选项时只需在此追加一行，无需改动扫描循环。
 _OPTION_SPECS = (
@@ -396,6 +429,7 @@ _OPTION_SPECS = (
     ),
     _OptionSpec(AND_KEYWORD_OPTION, takes_value=True, default=None),
     _OptionSpec(NOT_KEYWORD_OPTION, takes_value=True, default=None),
+    _OptionSpec(OR_KEYWORD_OPTION, takes_value=True, default=None),
     _OptionSpec(
         LIMIT_OPTION,
         takes_value=True,
@@ -422,7 +456,7 @@ def _parse_args(
     args: list[str],
 ) -> tuple[
     str, str, str | None, str | None, bool, bool, int, str | None, str | None,
-    str | None, int | None, int, str,
+    str | None, str | None, int | None, int, str,
 ]:
     """解析参数：恰好两个位置参数，其后可出现选项。
 
@@ -430,8 +464,8 @@ def _parse_args(
     - ``--path-contains <片段>``：路径包含片段，取紧随选项的一个参数，该值
       即使看起来像选项（包括 ``--path-excludes``、``--ignore-case``、
       ``--all-lines``、``--context-chars``、``--file-type``、
-      ``--and-keyword``、``--not-keyword``、``--limit``、``--offset``、
-      ``--format``）也仍是字面值；
+      ``--and-keyword``、``--not-keyword``、``--or-keyword``、
+      ``--limit``、``--offset``、``--format``）也仍是字面值；
     - ``--path-excludes <片段>``：路径排除片段，语义与取值规则同
       ``--path-contains``；文件相对路径包含该片段即被排除，不读取其内容；
     - ``--ignore-case``：无取值的开关，可重复指定即报错；
@@ -451,6 +485,10 @@ def _parse_args(
       才算命中，取紧随选项的一个参数，该值同样按字面消费（即使看起来像
       开关，如 ``--all-lines``，也按文本处理而不开启该开关）；缺省为
       ``None``，表示不做排除词筛选，缺值或重复指定均报错。
+    - ``--or-keyword <替代关键词>``：行内包含主关键词或该替代关键词之一
+      即满足关键词条件，取紧随选项的一个参数，该值同样按字面消费（即使
+      看起来像开关，如 ``--all-lines``，也按文本处理而不开启该开关）；
+      缺省为 ``None``，表示不做替代词匹配，缺值或重复指定均报错。
     - ``--limit <1-1000>``：结果数量上限，取紧随选项的一个参数，该值同样
       按字面消费（即使看起来像开关，如 ``--all-lines``，也作为取值校验而
       不开启该开关）；取值只接受非空的 ASCII 十进制数字串，允许前导零，
@@ -515,6 +553,7 @@ def _parse_args(
         values[FILE_TYPE_OPTION],
         values[AND_KEYWORD_OPTION],
         values[NOT_KEYWORD_OPTION],
+        values[OR_KEYWORD_OPTION],
         values[LIMIT_OPTION],
         values[OFFSET_OPTION],
         values[FORMAT_OPTION],
@@ -536,6 +575,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             file_type,
             and_keyword,
             not_keyword,
+            or_keyword,
             limit,
             offset,
             output_format,
@@ -553,6 +593,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _fail(f"错误: {AND_KEYWORD_OPTION} 的附加关键词为空或全为空白")
     if not_keyword is not None and not not_keyword.strip():
         return _fail(f"错误: {NOT_KEYWORD_OPTION} 的排除关键词为空或全为空白")
+    if or_keyword is not None and not or_keyword.strip():
+        return _fail(f"错误: {OR_KEYWORD_OPTION} 的替代关键词为空或全为空白")
     # 不跟随符号链接的规则同样覆盖所选目录本身：末级是符号链接时一律拒绝，
     # 无论链接指向目录、普通文件还是已失效。判定在存在性与目录检查之前，
     # 使失效链接与指向文件的链接也按本规则报错，而非报“目录不存在”或
@@ -590,7 +632,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             hits = _search_file(
                 path, keyword, ignore_case, all_lines, context_chars, and_keyword,
-                not_keyword,
+                not_keyword, or_keyword,
             )
         except UnicodeDecodeError as exc:
             _emit_stderr(f"警告: 跳过文件 {rel}: 无法按 UTF-8 解码 ({exc})")

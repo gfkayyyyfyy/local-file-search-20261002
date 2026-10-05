@@ -53,6 +53,7 @@ CONTEXT_CHARS_OPTION = "--context-chars"
 FILE_TYPE_OPTION = "--file-type"
 AND_KEYWORD_OPTION = "--and-keyword"
 NOT_KEYWORD_OPTION = "--not-keyword"
+OR_KEYWORD_OPTION = "--or-keyword"
 LIMIT_OPTION = "--limit"
 OFFSET_OPTION = "--offset"
 FORMAT_OPTION = "--format"
@@ -62,6 +63,7 @@ USAGE_LINE = (
     "[--ignore-case] [--all-lines] "
     "[--context-chars <0-200>] [--file-type <txt|md>] "
     "[--and-keyword <附加关键词>] [--not-keyword <排除关键词>] "
+    "[--or-keyword <替代关键词>] "
     "[--limit <1-1000>] [--offset <0-1000>] [--format <json|csv>]"
 )
 
@@ -86,7 +88,7 @@ class ParseArgsUnitTest(unittest.TestCase):
         self.assertEqual(
             _parse_args(["some-dir", "target"]),
             ("some-dir", "target", None, None, False, False, 30, None, None, None,
-             None, 0, "json"),
+             None, None, 0, "json"),
         )
 
     def test_all_options_parsed_in_declared_tuple_order(self) -> None:
@@ -108,6 +110,8 @@ class ParseArgsUnitTest(unittest.TestCase):
                 "budget",
                 NOT_KEYWORD_OPTION,
                 "draft",
+                OR_KEYWORD_OPTION,
+                "backup",
                 LIMIT_OPTION,
                 "2",
                 OFFSET_OPTION,
@@ -119,7 +123,7 @@ class ParseArgsUnitTest(unittest.TestCase):
         self.assertEqual(
             parsed,
             ("some-dir", "TARGET", "notes/", "private/", True, True, 0, "txt",
-             "budget", "draft", 2, 1, "csv"),
+             "budget", "draft", "backup", 2, 1, "csv"),
         )
 
     def test_option_token_as_keyword_stays_literal(self) -> None:
@@ -127,7 +131,7 @@ class ParseArgsUnitTest(unittest.TestCase):
         self.assertEqual(
             _parse_args(["some-dir", ALL_LINES_OPTION, IGNORE_CASE_OPTION]),
             ("some-dir", ALL_LINES_OPTION, None, None, True, False, 30, None, None,
-             None, None, 0, "json"),
+             None, None, None, 0, "json"),
         )
 
     def test_option_token_as_file_type_keyword_stays_literal(self) -> None:
@@ -135,7 +139,7 @@ class ParseArgsUnitTest(unittest.TestCase):
         self.assertEqual(
             _parse_args(["some-dir", FILE_TYPE_OPTION, IGNORE_CASE_OPTION]),
             ("some-dir", FILE_TYPE_OPTION, None, None, True, False, 30, None, None,
-             None, None, 0, "json"),
+             None, None, None, 0, "json"),
         )
 
     def test_option_token_as_value_stays_literal(self) -> None:
@@ -171,6 +175,7 @@ class ParseArgsUnitTest(unittest.TestCase):
             [FILE_TYPE_OPTION, "txt", FILE_TYPE_OPTION, "md"],
             [AND_KEYWORD_OPTION, "a", AND_KEYWORD_OPTION, "b"],
             [NOT_KEYWORD_OPTION, "a", NOT_KEYWORD_OPTION, "b"],
+            [OR_KEYWORD_OPTION, "a", OR_KEYWORD_OPTION, "b"],
             [LIMIT_OPTION, "1", LIMIT_OPTION, "2"],
             [OFFSET_OPTION, "1", OFFSET_OPTION, "2"],
             [FORMAT_OPTION, "json", FORMAT_OPTION, "csv"],
@@ -192,6 +197,7 @@ class ParseArgsUnitTest(unittest.TestCase):
             FILE_TYPE_OPTION,
             AND_KEYWORD_OPTION,
             NOT_KEYWORD_OPTION,
+            OR_KEYWORD_OPTION,
             LIMIT_OPTION,
             OFFSET_OPTION,
             FORMAT_OPTION,
@@ -248,8 +254,8 @@ class ParseArgsUnitTest(unittest.TestCase):
         )
 
     def test_format_values_parsed_or_rejected(self) -> None:
-        self.assertEqual(_parse_args(["d", "k", FORMAT_OPTION, "json"])[12], "json")
-        self.assertEqual(_parse_args(["d", "k", FORMAT_OPTION, "csv"])[12], "csv")
+        self.assertEqual(_parse_args(["d", "k", FORMAT_OPTION, "json"])[13], "json")
+        self.assertEqual(_parse_args(["d", "k", FORMAT_OPTION, "csv"])[13], "csv")
         bad_values = (
             "",
             " ",
@@ -337,9 +343,9 @@ class ParseArgsUnitTest(unittest.TestCase):
                 )
 
     def test_limit_leading_zeros_accepted(self) -> None:
-        self.assertEqual(_parse_args(["d", "k", LIMIT_OPTION, "007"])[10], 7)
-        self.assertEqual(_parse_args(["d", "k", LIMIT_OPTION, "1"])[10], 1)
-        self.assertEqual(_parse_args(["d", "k", LIMIT_OPTION, "01000"])[10], 1000)
+        self.assertEqual(_parse_args(["d", "k", LIMIT_OPTION, "007"])[11], 7)
+        self.assertEqual(_parse_args(["d", "k", LIMIT_OPTION, "1"])[11], 1)
+        self.assertEqual(_parse_args(["d", "k", LIMIT_OPTION, "01000"])[11], 1000)
 
     def test_limit_value_equal_to_switch_is_consumed_as_value(self) -> None:
         # --limit 的取值看似开关时先按字面消费，再按非法取值报错，
@@ -374,12 +380,12 @@ class ParseArgsUnitTest(unittest.TestCase):
                 )
 
     def test_offset_leading_zeros_and_zero_accepted(self) -> None:
-        self.assertEqual(_parse_args(["d", "k", OFFSET_OPTION, "0"])[11], 0)
-        self.assertEqual(_parse_args(["d", "k", OFFSET_OPTION, "000"])[11], 0)
-        self.assertEqual(_parse_args(["d", "k", OFFSET_OPTION, "007"])[11], 7)
-        self.assertEqual(_parse_args(["d", "k", OFFSET_OPTION, "01000"])[11], 1000)
+        self.assertEqual(_parse_args(["d", "k", OFFSET_OPTION, "0"])[12], 0)
+        self.assertEqual(_parse_args(["d", "k", OFFSET_OPTION, "000"])[12], 0)
+        self.assertEqual(_parse_args(["d", "k", OFFSET_OPTION, "007"])[12], 7)
+        self.assertEqual(_parse_args(["d", "k", OFFSET_OPTION, "01000"])[12], 1000)
         # 任意数量前导零的 "0"（远超 int() 默认 4300 位限制）仍合法为 0。
-        self.assertEqual(_parse_args(["d", "k", OFFSET_OPTION, "0" * 5000])[11], 0)
+        self.assertEqual(_parse_args(["d", "k", OFFSET_OPTION, "0" * 5000])[12], 0)
 
     def test_offset_value_equal_to_switch_is_consumed_as_value(self) -> None:
         # --offset 的取值看似开关时先按字面消费，再按非法取值报错，
@@ -524,6 +530,7 @@ class ArgumentParsingCliTest(unittest.TestCase):
             FILE_TYPE_OPTION: (FILE_TYPE_OPTION, "txt", FILE_TYPE_OPTION, "md"),
             AND_KEYWORD_OPTION: (AND_KEYWORD_OPTION, "a", AND_KEYWORD_OPTION, "b"),
             NOT_KEYWORD_OPTION: (NOT_KEYWORD_OPTION, "a", NOT_KEYWORD_OPTION, "b"),
+            OR_KEYWORD_OPTION: (OR_KEYWORD_OPTION, "a", OR_KEYWORD_OPTION, "b"),
             LIMIT_OPTION: (LIMIT_OPTION, "1", LIMIT_OPTION, "2"),
             OFFSET_OPTION: (OFFSET_OPTION, "1", OFFSET_OPTION, "2"),
             FORMAT_OPTION: (FORMAT_OPTION, "json", FORMAT_OPTION, "csv"),
@@ -544,6 +551,7 @@ class ArgumentParsingCliTest(unittest.TestCase):
             FILE_TYPE_OPTION,
             AND_KEYWORD_OPTION,
             NOT_KEYWORD_OPTION,
+            OR_KEYWORD_OPTION,
             LIMIT_OPTION,
             OFFSET_OPTION,
             FORMAT_OPTION,

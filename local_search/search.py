@@ -58,6 +58,9 @@ _ASCII_UPPER_TO_LOWER = str.maketrans(
     {code: code + 32 for code in range(ord("A"), ord("Z") + 1)}
 )
 
+# 平台认可的目录分隔符集合，用于剥离所选路径末尾的分隔符。
+_DIRECTORY_SEPARATORS = os.sep + (os.altsep or "")
+
 
 class TraversalError(Exception):
     """目录树无法完成遍历时抛出。"""
@@ -550,6 +553,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _fail(f"错误: {AND_KEYWORD_OPTION} 的附加关键词为空或全为空白")
     if not_keyword is not None and not not_keyword.strip():
         return _fail(f"错误: {NOT_KEYWORD_OPTION} 的排除关键词为空或全为空白")
+    # 不跟随符号链接的规则同样覆盖所选目录本身：末级是符号链接时一律拒绝，
+    # 无论链接指向目录、普通文件还是已失效。判定在存在性与目录检查之前，
+    # 使失效链接与指向文件的链接也按本规则报错，而非报“目录不存在”或
+    # “路径不是目录”；普通缺失路径与普通文件路径不是链接，仍走原有检查。
+    # 末尾的目录分隔符会让 lstat 跟随链接，先剥离再判定；错误说明中保留
+    # 用户传入的原始写法。拒绝发生在目录枚举与文件读取之前。
+    link_check_path = target_dir.rstrip(_DIRECTORY_SEPARATORS) or target_dir
+    if os.path.islink(link_check_path):
+        return _fail(f"错误: 所选目录不能是符号链接: {target_dir}")
     if not os.path.exists(target_dir):
         return _fail(f"错误: 目录不存在: {target_dir}")
     if not os.path.isdir(target_dir):

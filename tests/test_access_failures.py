@@ -9,6 +9,11 @@
 - 被 ``--path-contains`` 排除的失败文件根本不会被打开，也不产生告警，
   正常入选文件的结果保持不变。
 
+失败可能发生在两个阶段，公开行为完全一致，分别由两个测试类固定：
+- 打开阶段：``open`` 本身抛出 OSError（FileReadFailureTest）；
+- 内容读取阶段：``open`` 成功返回句柄，``read()`` 时才抛出 OSError
+  （ContentReadFailureTest，本文件后半部分）。
+
 目录枚举失败（选定目录或其子目录 scandir 抛出 OSError）——整个查询终止：
 - 退出码为 2，标准输出完全为空（不输出部分 JSON，不打印异常堆栈）；
 - 标准错误包含选定目录、"无法完成目录遍历"及失败原因；
@@ -18,7 +23,9 @@
 失败注入方式：不依赖 chmod、管理员权限或真实用户权限配置（这些在 Windows
 与 Linux 上行为不一致，且 root 下 chmod 不生效），而是用 unittest.mock 在
 进程内替换 ``local_search.search.open`` 与 ``os.scandir``，仅对目标路径抛出
-预定的 OSError，其余路径走真实实现。因此在两个平台上都能稳定复现。
+预定的 OSError，其余路径走真实实现。打开阶段的注入让 open 替身直接抛出；
+内容读取阶段的注入让 open 替身返回一个 read() 时才抛出的句柄，并记录
+open/read 调用以核对失败发生的阶段。因此在两个平台上都能稳定复现。
 
 用例通过公开入口 ``local_search.main`` 驱动，以其返回值对应退出码，并捕获
 ``sys.stdout``/``sys.stderr`` 的 ``.buffer`` 核对 UTF-8 字节输出——与
@@ -70,6 +77,45 @@ def _raising_open(failures: dict, calls: set | None = None):
             calls.add(key)
         if key in failures:
             raise failures[key]
+        return real_open(file, *args, **kwargs)
+
+    return fake_open
+
+
+class _ReadFailingHandle:
+    """open 成功返回的句柄替身：支持 with 协议，read() 时才抛出预定异常。"""
+
+    def __init__(self, key: str, error: OSError, reads: set | None) -> None:
+        self._key = key
+        self._error = error
+        self._reads = reads
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info) -> bool:
+        return False
+
+    def read(self, *args, **kwargs):
+        if self._reads is not None:
+            self._reads.add(self._key)
+        raise self._error
+
+
+def _read_raising_open(failures: dict, opens: set | None = None, reads: set | None = None):
+    """构造 open 替身：目标路径打开成功但 read() 抛出预定异常，其余走真实 open。
+
+    opens/reads 若给出，分别记录被打开与被读取的规范化路径，用于核对失败
+    发生在内容读取阶段（open 已返回，read 才被调用）以及被排除文件未被触碰。
+    """
+    real_open = open
+
+    def fake_open(file, *args, **kwargs):
+        key = os.path.normpath(os.fspath(file))
+        if opens is not None:
+            opens.add(key)
+        if key in failures:
+            return _ReadFailingHandle(key, failures[key], reads)
         return real_open(file, *args, **kwargs)
 
     return fake_open
@@ -203,6 +249,135 @@ class FileReadFailureTest(unittest.TestCase):
         self.assertNotIn(
             self._path("notes/b.md"), read_calls, "被路径筛选排除的文件不应被打开"
         )
+
+
+class ContentReadFailureTest(unittest.TestCase):
+    """候选文件打开成功、读取内容时抛出 OSError：公开行为与打开失败一致。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        (self.root / "a.txt").write_bytes(b"alpha\ntarget note\n")
+        (self.root / "notes").mkdir()
+        (self.root / "notes" / "b.md").write_bytes(b"target again\n")
+
+    def _path(self, rel: str) -> str:
+        return os.path.normpath(str(self.root / rel))
+
+    def _run_with_read_failures(
+        self, failures: dict, argv: list, opens: set | None = None, reads: set | None = None
+    ):
+        with mock.patch(
+            "local_search.search.open",
+            _read_raising_open(failures, opens, reads),
+            create=True,
+        ):
+            return run_main(argv)
+
+    def _snapshot_files(self) -> dict:
+        return {
+            str(p.relative_to(self.root)).replace(os.sep, "/"): p.read_bytes()
+            for p in self.root.rglob("*")
+            if p.is_file()
+        }
+
+    def test_baseline_all_reads_succeed(self) -> None:
+        # 不注入任何失败：两个文件各命中一行，标准错误为空。
+        before = self._snapshot_files()
+
+        code, out, err = run_main([str(self.root), "target"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            json.loads(out.decode("utf-8")),
+            [
+                {"path": "a.txt", "line": 2, "snippet": "target note"},
+                {"path": "notes/b.md", "line": 1, "snippet": "target again"},
+            ],
+        )
+        self.assertEqual(err, b"", "全部读取正常时标准错误必须为空")
+        self.assertEqual(before, self._snapshot_files(), "查询必须只读源文件且不留下索引")
+
+    def test_read_failure_on_one_file_skips_it_and_keeps_others(self) -> None:
+        # notes/b.md 打开成功、read() 时抛出 OSError(EIO)；a.txt 不受影响。
+        opens: set = set()
+        reads: set = set()
+        failures = {
+            self._path("notes/b.md"): OSError(errno.EIO, "I/O error"),
+        }
+        before = self._snapshot_files()
+
+        code, out, err = self._run_with_read_failures(
+            failures, [str(self.root), "target"], opens=opens, reads=reads
+        )
+
+        self.assertEqual(code, 0, "单文件内容读取失败不应改变退出码")
+        self.assertEqual(
+            json.loads(out.decode("utf-8")),
+            [{"path": "a.txt", "line": 2, "snippet": "target note"}],
+            "失败文件不贡献任何结果，a.txt 的第 2 行命中保持原样",
+        )
+        # 失败发生在内容读取阶段：文件已被打开，read() 才被调用并抛出。
+        self.assertIn(self._path("notes/b.md"), opens, "失败文件应已成功打开")
+        self.assertIn(self._path("notes/b.md"), reads, "失败应发生在 read() 阶段")
+        stderr = err.decode("utf-8")
+        warning_lines = [line for line in stderr.splitlines() if line.strip()]
+        self.assertEqual(len(warning_lines), 1, "标准错误应恰有一条告警")
+        self.assertIn("notes/b.md", warning_lines[0], "告警必须报告正斜杠相对路径")
+        self.assertIn("无法读取", warning_lines[0])
+        self.assertIn("I/O error", warning_lines[0], "告警必须包含失败原因")
+        self.assertNotIn("Traceback", stderr, "不得向用户打印异常堆栈")
+        self.assertEqual(
+            before, self._snapshot_files(), "查询前后文件路径与字节内容必须一致，不留下索引或导出文件"
+        )
+
+    def test_all_files_fail_at_read_returns_empty_array_and_warns_each(self) -> None:
+        # 两个候选文件都在内容读取时抛出同一个 OSError(EIO)。
+        failures = {
+            self._path("a.txt"): OSError(errno.EIO, "I/O error"),
+            self._path("notes/b.md"): OSError(errno.EIO, "I/O error"),
+        }
+
+        code, out, err = self._run_with_read_failures(failures, [str(self.root), "target"])
+
+        self.assertEqual(code, 0, "全部文件读取失败时退出码仍为 0")
+        self.assertEqual(json.loads(out.decode("utf-8")), [], "全部失败时结果仍为 []")
+        stderr = err.decode("utf-8")
+        warning_lines = [line for line in stderr.splitlines() if line.strip()]
+        self.assertEqual(len(warning_lines), 2, "每个失败文件各产生一条告警")
+        # 告警顺序不作为约束，逐文件核对内容即可。
+        for rel in ("a.txt", "notes/b.md"):
+            line = next(line for line in warning_lines if rel in line)
+            self.assertIn("无法读取", line)
+            self.assertIn("I/O error", line)
+
+    def test_path_contains_excludes_file_before_it_is_opened(self) -> None:
+        # --path-contains a.txt 排除 notes/b.md：它在读取前被排除，
+        # 既不打开也不触发读取失败，不产生任何告警。
+        opens: set = set()
+        reads: set = set()
+        failures = {
+            self._path("notes/b.md"): OSError(errno.EIO, "I/O error"),
+        }
+
+        code, out, err = self._run_with_read_failures(
+            failures,
+            [str(self.root), "target", "--path-contains", "a.txt"],
+            opens=opens,
+            reads=reads,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            json.loads(out.decode("utf-8")),
+            [{"path": "a.txt", "line": 2, "snippet": "target note"}],
+            "入选文件的结果与不注入失败时保持一致",
+        )
+        self.assertEqual(err, b"", "被排除的失败文件不得产生任何告警")
+        excluded = self._path("notes/b.md")
+        self.assertNotIn(excluded, opens, "被路径筛选排除的文件不应被打开")
+        self.assertNotIn(excluded, reads, "被路径筛选排除的文件不应被读取")
 
 
 class TraversalFailureTest(unittest.TestCase):

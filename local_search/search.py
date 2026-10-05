@@ -58,6 +58,10 @@ _ASCII_UPPER_TO_LOWER = str.maketrans(
     {code: code + 32 for code in range(ord("A"), ord("Z") + 1)}
 )
 
+# 平台认可的目录分隔符（POSIX 仅 "/"，Windows 另有 "/"），用于在末级
+# 符号链接检查前去掉用户写法末尾的分隔符。
+_TRAILING_SEPARATORS = tuple(sep for sep in (os.sep, os.altsep) if sep)
+
 
 class TraversalError(Exception):
     """目录树无法完成遍历时抛出。"""
@@ -550,6 +554,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _fail(f"错误: {AND_KEYWORD_OPTION} 的附加关键词为空或全为空白")
     if not_keyword is not None and not not_keyword.strip():
         return _fail(f"错误: {NOT_KEYWORD_OPTION} 的排除关键词为空或全为空白")
+    # 所选路径末级本身是符号链接时一律拒绝：无论目标是目录、普通文件还是
+    # 已失效，都在目录枚举与文件读取之前返回 2，与“遍历中不跟随符号链接”
+    # 的公开规则保持一致。os.path.islink 对末尾带目录分隔符的写法会先解析
+    # 链接再判断，因此先去掉末尾分隔符再检查末级；错误消息仍保留用户传入
+    # 的原始写法。只检查末级本身，不展开父目录中的链接，也不特殊处理
+    # Windows 目录联接等其他文件系统对象。
+    candidate = target_dir
+    while len(candidate) > 1 and candidate[-1] in _TRAILING_SEPARATORS:
+        candidate = candidate[:-1]
+    if os.path.islink(candidate):
+        return _fail(f"错误: 所选目录不能是符号链接: {target_dir}")
     if not os.path.exists(target_dir):
         return _fail(f"错误: 目录不存在: {target_dir}")
     if not os.path.isdir(target_dir):

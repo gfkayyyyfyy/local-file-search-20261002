@@ -60,7 +60,7 @@ FORMAT_OPTION = "--format"
 SHOW_COLUMN_OPTION = "--show-column"
 USAGE_LINE = (
     "用法: python -m local_search <目录> <关键词> "
-    "[--path-contains <路径片段>] [--path-excludes <路径片段>] "
+    "[--path-contains <路径片段>] [--path-excludes <路径片段>]... "
     "[--ignore-case] [--all-lines] "
     "[--context-chars <0-200>] [--file-type <txt|md>] "
     "[--and-keyword <附加关键词>] [--not-keyword <排除关键词>] "
@@ -89,7 +89,7 @@ class ParseArgsUnitTest(unittest.TestCase):
     def test_defaults_when_no_options(self) -> None:
         self.assertEqual(
             _parse_args(["some-dir", "target"]),
-            ("some-dir", "target", None, None, False, False, 30, None, None, None,
+            ("some-dir", "target", None, [], False, False, 30, None, None, None,
              None, None, 0, "json", False),
         )
 
@@ -125,7 +125,7 @@ class ParseArgsUnitTest(unittest.TestCase):
         )
         self.assertEqual(
             parsed,
-            ("some-dir", "TARGET", "notes/", "private/", True, True, 0, "txt",
+            ("some-dir", "TARGET", "notes/", ["private/"], True, True, 0, "txt",
              "budget", "draft", "backup", 2, 1, "csv", True),
         )
 
@@ -133,7 +133,7 @@ class ParseArgsUnitTest(unittest.TestCase):
         # 关键词恰为开关记号时，后面的位置才进入选项扫描。
         self.assertEqual(
             _parse_args(["some-dir", ALL_LINES_OPTION, IGNORE_CASE_OPTION]),
-            ("some-dir", ALL_LINES_OPTION, None, None, True, False, 30, None, None,
+            ("some-dir", ALL_LINES_OPTION, None, [], True, False, 30, None, None,
              None, None, None, 0, "json", False),
         )
 
@@ -141,7 +141,7 @@ class ParseArgsUnitTest(unittest.TestCase):
         # 关键词恰为 --file-type 时仍是字面文本，后面的参数才进入选项扫描。
         self.assertEqual(
             _parse_args(["some-dir", FILE_TYPE_OPTION, IGNORE_CASE_OPTION]),
-            ("some-dir", FILE_TYPE_OPTION, None, None, True, False, 30, None, None,
+            ("some-dir", FILE_TYPE_OPTION, None, [], True, False, 30, None, None,
              None, None, None, 0, "json", False),
         )
 
@@ -169,12 +169,12 @@ class ParseArgsUnitTest(unittest.TestCase):
         )
 
     def test_duplicate_option_raises_for_every_option(self) -> None:
+        # --path-excludes 可重复指定，不在本表；其余选项重复指定均报错。
         cases = (
             [IGNORE_CASE_OPTION, IGNORE_CASE_OPTION],
             [ALL_LINES_OPTION, ALL_LINES_OPTION],
             [CONTEXT_CHARS_OPTION, "1", CONTEXT_CHARS_OPTION, "2"],
             [PATH_OPTION, "a", PATH_OPTION, "b"],
-            [EXCLUDES_OPTION, "a", EXCLUDES_OPTION, "b"],
             [FILE_TYPE_OPTION, "txt", FILE_TYPE_OPTION, "md"],
             [AND_KEYWORD_OPTION, "a", AND_KEYWORD_OPTION, "b"],
             [NOT_KEYWORD_OPTION, "a", NOT_KEYWORD_OPTION, "b"],
@@ -192,6 +192,28 @@ class ParseArgsUnitTest(unittest.TestCase):
                 self.assertEqual(
                     str(caught.exception), f"错误: 选项 {name} 只能指定一次"
                 )
+
+    def test_path_excludes_is_repeatable_and_accumulates(self) -> None:
+        # 每次出现各消费一个片段，按出现顺序追加；重复相同片段不报错。
+        self.assertEqual(
+            _parse_args(
+                ["d", "k", EXCLUDES_OPTION, "a", EXCLUDES_OPTION, "b"]
+            )[3],
+            ["a", "b"],
+        )
+        self.assertEqual(
+            _parse_args(
+                ["d", "k", EXCLUDES_OPTION, "a", EXCLUDES_OPTION, "a"]
+            )[3],
+            ["a", "a"],
+        )
+        # 看似开关的取值仍按字面片段消费。
+        self.assertEqual(
+            _parse_args(
+                ["d", "k", EXCLUDES_OPTION, IGNORE_CASE_OPTION, EXCLUDES_OPTION, "x"]
+            )[3],
+            [IGNORE_CASE_OPTION, "x"],
+        )
 
     def test_missing_value_raises_for_value_options(self) -> None:
         for name in (
@@ -520,6 +542,7 @@ class ArgumentParsingCliTest(unittest.TestCase):
         )
 
     def test_duplicate_options_fail_before_scan(self) -> None:
+        # --path-excludes 可重复指定，不在本表；其余选项重复指定均报错。
         cases = {
             IGNORE_CASE_OPTION: (IGNORE_CASE_OPTION, IGNORE_CASE_OPTION),
             ALL_LINES_OPTION: (ALL_LINES_OPTION, ALL_LINES_OPTION),
@@ -530,7 +553,6 @@ class ArgumentParsingCliTest(unittest.TestCase):
                 "2",
             ),
             PATH_OPTION: (PATH_OPTION, "a", PATH_OPTION, "b"),
-            EXCLUDES_OPTION: (EXCLUDES_OPTION, "a", EXCLUDES_OPTION, "b"),
             FILE_TYPE_OPTION: (FILE_TYPE_OPTION, "txt", FILE_TYPE_OPTION, "md"),
             AND_KEYWORD_OPTION: (AND_KEYWORD_OPTION, "a", AND_KEYWORD_OPTION, "b"),
             NOT_KEYWORD_OPTION: (NOT_KEYWORD_OPTION, "a", NOT_KEYWORD_OPTION, "b"),

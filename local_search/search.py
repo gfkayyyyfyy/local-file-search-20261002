@@ -2,7 +2,7 @@
 
 用法：
     python -m local_search <目录> <关键词> [--path-contains <路径片段>]
-                           [--path-excludes <路径片段>]
+                           [--path-excludes <路径片段>]...
                            [--ignore-case] [--all-lines]
                            [--context-chars <0-200>]
                            [--file-type <txt|md>]
@@ -49,7 +49,7 @@ FORMAT_VALUES = ("json", "csv")
 FILE_TYPE_SUFFIXES = {"txt": (".txt",), "md": (".md",)}
 USAGE = (
     "用法: python -m local_search <目录> <关键词> "
-    "[--path-contains <路径片段>] [--path-excludes <路径片段>] "
+    "[--path-contains <路径片段>] [--path-excludes <路径片段>]... "
     "[--ignore-case] [--all-lines] "
     "[--context-chars <0-200>] [--file-type <txt|md>] "
     "[--and-keyword <附加关键词>] [--not-keyword <排除关键词>] "
@@ -406,7 +406,9 @@ class _OptionSpec:
     ``takes_value`` 为真时消费紧随其后的一个参数，该参数始终按字面值获取，
     即使看起来像开关也不再二次解释；``validate`` 若给出，则对取到的字面值
     做格式与范围校验，返回最终存入解析结果的值。``default`` 是选项缺省时
-    解析结果中使用的值。
+    解析结果中使用的值。``repeatable`` 为真时选项可重复指定（仅对带值选项
+    有意义）：每次出现各消费一个取值并依次追加到列表，重复指定不报错，
+    缺省时解析结果为空列表。
     """
 
     def __init__(
@@ -415,19 +417,22 @@ class _OptionSpec:
         takes_value: bool,
         default: Any = None,
         validate: Callable[[str], Any] | None = None,
+        repeatable: bool = False,
     ) -> None:
         self.name = name
         self.takes_value = takes_value
         self.default = default
         self.validate = validate
+        self.repeatable = repeatable
 
 
-# 十三个选项共用同一套规则（至多出现一次；带值选项缺值即报错；取值按字面
-# 消费），差异只在“是否带值”“缺省值”和“取值校验”三处，集中在本表声明。
+# 十三个选项共用同一套规则（带值选项缺值即报错；取值按字面消费；除
+# --path-excludes 可重复指定外，其余选项至多出现一次），差异只在“是否带值”
+# “缺省值”“取值校验”和“是否可重复”四处，集中在本表声明。
 # 新增选项时只需在此追加一行，无需改动扫描循环。
 _OPTION_SPECS = (
     _OptionSpec(PATH_OPTION, takes_value=True),
-    _OptionSpec(PATH_EXCLUDES_OPTION, takes_value=True),
+    _OptionSpec(PATH_EXCLUDES_OPTION, takes_value=True, repeatable=True),
     _OptionSpec(IGNORE_CASE_OPTION, takes_value=False, default=False),
     _OptionSpec(ALL_LINES_OPTION, takes_value=False, default=False),
     _OptionSpec(
@@ -471,7 +476,7 @@ _OPTION_BY_TOKEN = {spec.name: spec for spec in _OPTION_SPECS}
 def _parse_args(
     args: list[str],
 ) -> tuple[
-    str, str, str | None, str | None, bool, bool, int, str | None, str | None,
+    str, str, str | None, list[str], bool, bool, int, str | None, str | None,
     str | None, str | None, int | None, int, str, bool,
 ]:
     """解析参数：恰好两个位置参数，其后可出现选项。
@@ -483,8 +488,11 @@ def _parse_args(
       ``--and-keyword``、``--not-keyword``、``--or-keyword``、
       ``--limit``、``--offset``、``--format``、``--show-column``）也仍是
       字面值；
-    - ``--path-excludes <片段>``：路径排除片段，语义与取值规则同
-      ``--path-contains``；文件相对路径包含该片段即被排除，不读取其内容；
+    - ``--path-excludes <片段>``：路径排除片段，可重复指定，每次出现各消费
+      紧随其后的一个参数作为片段（取值规则同 ``--path-contains``，即使看似
+      开关也按字面处理）；文件相对路径包含任意一个片段即被排除，不读取其
+      内容。重复相同片段不报错，片段顺序不影响结果；缺省时为空列表，不
+      排除任何文件；
     - ``--ignore-case``：无取值的开关，可重复指定即报错；
     - ``--all-lines``：无取值的开关，每个命中行各返回一项，可重复指定即报错；
     - ``--context-chars <0-200>``：片段上下文的码点数，取紧随选项的一个
@@ -534,16 +542,19 @@ def _parse_args(
     为任一选项记号）仍是字面文本。
 
     各选项的去重、缺值与取值校验由统一的扫描循环按 :data:`_OPTION_SPECS`
-    完成：选项记号按出现顺序查表，重复指定对所有选项都优先报“只能指定
-    一次”，带值选项缺紧随参数时报“缺少值”，无法查表的记号按出现位置报
-    “无法识别的参数”，因此多个错误并存时报告的仍是扫描到的第一个。
+    完成：选项记号按出现顺序查表，除可重复的 ``--path-excludes`` 外，重复
+    指定对任何选项都优先报“只能指定一次”，带值选项缺紧随参数时报“缺少值”，
+    无法查表的记号按出现位置报“无法识别的参数”，因此多个错误并存时报告的
+    仍是扫描到的第一个。
     """
     if len(args) < 2:
         raise ArgumentError(USAGE)
 
     target_dir, keyword = args[0], args[1]
 
-    values: dict[str, Any] = {spec.name: spec.default for spec in _OPTION_SPECS}
+    values: dict[str, Any] = {
+        spec.name: [] if spec.repeatable else spec.default for spec in _OPTION_SPECS
+    }
     seen: set[str] = set()
     rest = args[2:]
     index = 0
@@ -552,7 +563,7 @@ def _parse_args(
         spec = _OPTION_BY_TOKEN.get(token)
         if spec is None:
             raise ArgumentError(f"错误: 无法识别的参数: {token}")
-        if spec.name in seen:
+        if spec.name in seen and not spec.repeatable:
             raise ArgumentError(f"错误: 选项 {spec.name} 只能指定一次")
         seen.add(spec.name)
         if not spec.takes_value:
@@ -562,7 +573,11 @@ def _parse_args(
             raise ArgumentError(f"错误: 选项 {spec.name} 缺少值")
         # 取值始终按字面消费，不把它解释成任何开关。
         raw_value = rest[index + 1]
-        values[spec.name] = spec.validate(raw_value) if spec.validate else raw_value
+        value = spec.validate(raw_value) if spec.validate else raw_value
+        if spec.repeatable:
+            values[spec.name].append(value)
+        else:
+            values[spec.name] = value
         index += 2
 
     return (
@@ -612,8 +627,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _fail("错误: 关键词为空或全为空白")
     if path_contains is not None and not path_contains.strip():
         return _fail(f"错误: {PATH_OPTION} 的路径片段为空或全为空白")
-    if path_excludes is not None and not path_excludes.strip():
-        return _fail(f"错误: {PATH_EXCLUDES_OPTION} 的路径片段为空或全为空白")
+    for exclude_fragment in path_excludes:
+        if not exclude_fragment.strip():
+            return _fail(f"错误: {PATH_EXCLUDES_OPTION} 的路径片段为空或全为空白")
     if and_keyword is not None and not and_keyword.strip():
         return _fail(f"错误: {AND_KEYWORD_OPTION} 的附加关键词为空或全为空白")
     if not_keyword is not None and not not_keyword.strip():
@@ -649,10 +665,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # 先按路径决定文件是否参与内容检索：未通过路径筛选的文件既不读取也
         # 不校验，因此即使无法读取或含非法 UTF-8 字节也不会产生该文件的告警。
         # 路径筛选始终区分大小写、按连续字面子串比较，不受 --ignore-case 影响。
-        # 同时给出包含与排除片段时，文件须符合包含条件且不符合排除条件。
+        # 同时给出包含与排除片段时，文件须符合包含条件且不匹配任何排除片段。
         if path_contains is not None and path_contains not in rel:
             continue
-        if path_excludes is not None and path_excludes in rel:
+        if any(fragment in rel for fragment in path_excludes):
             continue
         try:
             hits = _search_file(

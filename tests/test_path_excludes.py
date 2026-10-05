@@ -10,9 +10,11 @@
   字节产生解码告警；
 - 与 ``--path-contains`` 同用时，文件须符合包含条件且不符合排除条件才参与
   内容检索；两个选项可与其他选项以任意先后顺序同用；
+- 选项可重复指定，每次出现各消费紧随其后的一个片段；相对路径包含任意一个
+  片段即排除该文件，重复相同片段不报错，片段顺序不影响结果；
 - 取值即使看似开关（如 ``--ignore-case``）也按字面片段处理，不启用开关；
   第二个位置参数即使恰好写作 ``--path-excludes`` 也仍是关键词；
-- 缺值、重复指定、值为空或全为空白时在扫描前退出码 2、标准输出为空、标准
+- 缺值、任一片段为空或全为空白时在扫描前退出码 2、标准输出为空、标准
   错误指出选项名称及原因；
 - 有效筛选后无内容命中时输出 ``[]``、退出码 0、标准错误为空；
 - 保留的候选文件无法完整解码为 UTF-8 时仍整文件跳过并向标准错误告警，其余
@@ -400,11 +402,82 @@ class PathExcludesTest(unittest.TestCase):
                 proc = run_args(self.root, KEYWORD, EXCLUDES_OPTION, value)
                 self.assert_argument_error(proc, "为空或全为空白", f"纯空白取值 {value!r}")
 
-    def test_duplicate_option_is_argument_error(self) -> None:
+    def test_repeated_option_excludes_union_of_fragments(self) -> None:
+        # 多个片段取并集：notes/ 与 upper.txt 各自排除一部分，互不重叠。
         proc = run_args(
-            self.root, KEYWORD, EXCLUDES_OPTION, "a", EXCLUDES_OPTION, "b"
+            self.root,
+            "TARGET",
+            IGNORE_CASE_OPTION,
+            ALL_LINES_OPTION,
+            CONTEXT_CHARS_OPTION,
+            "0",
+            EXCLUDES_OPTION,
+            "notes/",
+            EXCLUDES_OPTION,
+            "upper.txt",
         )
-        self.assert_argument_error(proc, "只能指定一次", "重复选项")
+        results = self.assert_success_clean(proc, "多片段并集排除")
+        self.assertEqual(
+            results,
+            [{"path": "a.txt", "line": 1, "snippet": "target"}],
+        )
+
+    def test_repeated_identical_fragment_is_not_an_error(self) -> None:
+        proc = run_args(
+            self.root, KEYWORD, EXCLUDES_OPTION, "private/", EXCLUDES_OPTION, "private/"
+        )
+        results = self.assert_success_clean(proc, "重复相同片段")
+        self.assertEqual(
+            [item["path"] for item in results],
+            ["Notes/upper.txt", "a.txt", "notes/b.md"],
+        )
+
+    def test_fragment_order_does_not_change_result(self) -> None:
+        forward = run_args(
+            self.root, KEYWORD, EXCLUDES_OPTION, "notes/", EXCLUDES_OPTION, "a.txt"
+        )
+        backward = run_args(
+            self.root, KEYWORD, EXCLUDES_OPTION, "a.txt", EXCLUDES_OPTION, "notes/"
+        )
+        for proc in (forward, backward):
+            self.assertEqual(proc.returncode, 0)
+        self.assertEqual(forward.stdout, backward.stdout)
+        self.assertEqual(
+            json.loads(forward.stdout.decode("utf-8")),
+            [{"path": "Notes/upper.txt", "line": 1, "snippet": "target upper"}],
+        )
+
+    def test_multiple_excludes_combined_with_contains(self) -> None:
+        # 包含 notes/ 且同时排除 b.md 与 private/：没有任何文件合格，
+        # 坏文件被排除因而不告警。
+        proc = run_args(
+            self.root,
+            KEYWORD,
+            CONTAINS_OPTION,
+            "notes/",
+            EXCLUDES_OPTION,
+            "b.md",
+            EXCLUDES_OPTION,
+            "private/",
+        )
+        results = self.assert_success_clean(proc, "contains 与多片段排除组合")
+        self.assertEqual(results, [])
+
+    def test_any_blank_fragment_among_repeats_is_argument_error(self) -> None:
+        # 任一片段为空或全为空白都在扫描前报错，即使其他片段合法。
+        for argv in (
+            (EXCLUDES_OPTION, "private/", EXCLUDES_OPTION, ""),
+            (EXCLUDES_OPTION, "  ", EXCLUDES_OPTION, "private/"),
+        ):
+            with self.subTest(argv=argv):
+                proc = run_args(self.root, KEYWORD, *argv)
+                self.assert_argument_error(proc, "为空或全为空白", "重复中出现空白片段")
+
+    def test_missing_value_after_repeat_is_argument_error(self) -> None:
+        proc = run_args(
+            self.root, KEYWORD, EXCLUDES_OPTION, "private/", EXCLUDES_OPTION
+        )
+        self.assert_argument_error(proc, "缺少值", "重复后缺少取值")
 
     def test_errors_occur_before_scanning(self) -> None:
         # 参数非法时即使目录不存在也只报参数错误，且标准输出为空、退出 2。

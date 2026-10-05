@@ -1,19 +1,21 @@
-"""``--and-keyword`` 同行双关键词筛选的端到端回归测试。
+"""``--and-keyword`` 同行多关键词筛选的端到端回归测试。
 
-通过命令入口 ``python -m local_search <目录> <关键词> --and-keyword <附加关键词>``
+通过命令入口 ``python -m local_search <目录> <关键词> [--and-keyword <附加关键词>]...``
 固定从命令行输入到 JSON 结果输出的行为：
 
-- 只有同一行分别包含主关键词与附加关键词才算命中，分处不同行不能合并；
-  两者出现顺序不限，相同关键词或重叠匹配可共用文字；
-- 两词均按连续字面子串匹配（不拆词、不解释正则或通配符，首尾空格保留），
-  默认区分大小写；``--ignore-case`` 同时作用于二者，仍只折叠 ASCII 字母；
+- 只有同一行分别包含主关键词与每个附加关键词才算命中，分处不同行不能合并；
+  各词出现顺序不限，相同关键词或重叠匹配可共用文字；
+- ``--and-keyword`` 可重复指定以同时要求多个附加关键词：各次取值按出现顺序
+  累积，附加词的顺序与重复值不影响结果；未指定或只指定一次时行为与此前一致；
+- 各词均按连续字面子串匹配（不拆词、不解释正则或通配符，首尾空格保留），
+  默认区分大小写；``--ignore-case`` 同时作用于全部附加词，仍只折叠 ASCII 字母；
 - 默认每个文件返回行号最小的合格行；``--all-lines`` 每个合格行各返回一项，
   行内重复出现不增加结果；
 - snippet 围绕主关键词在该行最左侧的命中，保留源文本大小写，
   ``--context-chars`` 沿用既有规则，不为展示附加关键词扩大片段；
 - 附加值即使写作 ``--all-lines`` 也按文本处理，不开启开关；位置参数或路径
   选项取值中的 ``--and-keyword`` 仍按字面处理；
-- 缺值、重复指定、值为空或全为空白时在扫描前结束：退出码 2、标准输出为空、
+- 缺值、任一值为空或全为空白时在扫描前结束：退出码 2、标准输出为空、
   标准错误包含选项名及对应原因；未提供该选项时既有行为完全不变；
 - 路径与格式筛选继续生效，被过滤文件不读取、不告警；选中文件无法读取或含
   非法 UTF-8 时整文件告警跳过，其他文件继续，退出码仍为 0；
@@ -128,6 +130,83 @@ class AndKeywordTest(unittest.TestCase):
                 {"path": "a.txt", "line": 4, "snippet": "target"},
             ],
             "第 3、4 行各返回一项；第 4 行片段是主关键词 target 而非 budget",
+        )
+
+    # -- 1b. 多附加词验收场景：默认只返回第 2 行，--all-lines 追加第 3 行 --
+
+    def _write_multi_acceptance_sample(self) -> None:
+        # 多附加词验收目录布局：三行依次为 target red / target blue red /
+        # target red blue。
+        self._write_text("a.txt", "target red\ntarget blue red\ntarget red blue\n")
+
+    def test_multi_acceptance_default_returns_lowest_qualified_line(self) -> None:
+        self._write_multi_acceptance_sample()
+
+        results = self.assert_success_clean(
+            run_args(self.root, "target", AND_KEYWORD, "red", AND_KEYWORD, "blue",
+                     CONTEXT_CHARS, "0"),
+            "多附加词验收：默认模式",
+        )
+        self.assertEqual(
+            results,
+            [{"path": "a.txt", "line": 2, "snippet": "target"}],
+            "只有同时含 red 与 blue 的第 2 行合格，片段为主关键词命中 target",
+        )
+
+    def test_multi_acceptance_all_lines_adds_third_line(self) -> None:
+        self._write_multi_acceptance_sample()
+
+        results = self.assert_success_clean(
+            run_args(self.root, "target", AND_KEYWORD, "red", AND_KEYWORD, "blue",
+                     CONTEXT_CHARS, "0", ALL_LINES),
+            "多附加词验收：逐行模式",
+        )
+        self.assertEqual(
+            results,
+            [
+                {"path": "a.txt", "line": 2, "snippet": "target"},
+                {"path": "a.txt", "line": 3, "snippet": "target"},
+            ],
+            "第 2、3 行各返回一项；第 1 行缺少 blue 不合格",
+        )
+
+    def test_multi_acceptance_duplicate_and_reordered_values_same_result(self) -> None:
+        self._write_multi_acceptance_sample()
+        expected = [
+            {"path": "a.txt", "line": 2, "snippet": "target"},
+            {"path": "a.txt", "line": 3, "snippet": "target"},
+        ]
+
+        reordered = self.assert_success_clean(
+            run_args(self.root, "target", AND_KEYWORD, "blue", AND_KEYWORD, "red",
+                     CONTEXT_CHARS, "0", ALL_LINES),
+            "调换附加词顺序",
+        )
+        self.assertEqual(reordered, expected, "附加词顺序不影响结果")
+
+        duplicated = self.assert_success_clean(
+            run_args(self.root, "target", AND_KEYWORD, "red", AND_KEYWORD, "blue",
+                     AND_KEYWORD, "red", CONTEXT_CHARS, "0", ALL_LINES),
+            "重复相同附加词",
+        )
+        self.assertEqual(duplicated, expected, "重复值不改变结果")
+
+    def test_all_and_keywords_must_appear_on_the_same_line(self) -> None:
+        # red 与 blue 分处不同行不能合并；三个附加词也须全部落在同一行。
+        self._write_text(
+            "a.txt",
+            "target red\ntarget blue\ntarget red blue\ntarget red blue green\n",
+        )
+
+        results = self.assert_success_clean(
+            run_args(self.root, "target", AND_KEYWORD, "red", AND_KEYWORD, "blue",
+                     AND_KEYWORD, "green", ALL_LINES, CONTEXT_CHARS, "0"),
+            "三附加词同行",
+        )
+        self.assertEqual(
+            results,
+            [{"path": "a.txt", "line": 4, "snippet": "target"}],
+            "只有同时含 red、blue、green 的第 4 行合格",
         )
 
     # -- 2. 同行语义：分处不同行不能合并，顺序不限 -------------------------
@@ -419,21 +498,40 @@ class AndKeywordTest(unittest.TestCase):
         self.assertIn("broken.txt", stderr)
         self.assertIn("无法按 UTF-8 解码", stderr)
 
-    # -- 11. 参数错误：缺值、重复、空值、全空白 → 扫描前退出 2 -------------
+    # -- 11. 参数错误：缺值、空值、全空白 → 扫描前退出 2 --------------------
 
     def test_missing_value_is_argument_error(self) -> None:
         proc = run_args(self.root, "target", AND_KEYWORD)
         self.assert_argument_error(proc, "缺少值", "缺值")
 
-    def test_duplicate_option_is_argument_error(self) -> None:
-        proc = run_args(self.root, "target", AND_KEYWORD, "a", AND_KEYWORD, "b")
-        self.assert_argument_error(proc, "只能指定一次", "重复指定")
+    def test_missing_value_after_valid_value_is_argument_error(self) -> None:
+        # 可重复指定后，任何一次缺紧随参数仍报缺值。
+        proc = run_args(self.root, "target", AND_KEYWORD, "red", AND_KEYWORD)
+        self.assert_argument_error(proc, "缺少值", "重复后缺值")
+
+    def test_repeated_option_is_accepted_not_an_error(self) -> None:
+        # --and-keyword 可重复指定：重复出现不再报“只能指定一次”。
+        self._write_multi_acceptance_sample()
+        results = self.assert_success_clean(
+            run_args(self.root, "target", AND_KEYWORD, "red", AND_KEYWORD, "blue",
+                     CONTEXT_CHARS, "0"),
+            "重复指定合法",
+        )
+        self.assertEqual(
+            results,
+            [{"path": "a.txt", "line": 2, "snippet": "target"}],
+        )
 
     def test_empty_or_blank_value_is_argument_error(self) -> None:
         for raw in ("", " ", "   ", "\t"):
             with self.subTest(raw=raw):
                 proc = run_args(self.root, "target", AND_KEYWORD, raw)
                 self.assert_argument_error(proc, "为空或全为空白", f"空白值 {raw!r}")
+
+    def test_blank_value_among_valid_values_is_argument_error(self) -> None:
+        # 任一附加词为空或全为空白都在扫描前报错，即使其他取值合法。
+        proc = run_args(self.root, "target", AND_KEYWORD, "red", AND_KEYWORD, " ")
+        self.assert_argument_error(proc, "为空或全为空白", "多值中含空白值")
 
     def test_argument_errors_happen_before_any_scan(self) -> None:
         # 目录不存在时，--and-keyword 的参数错误仍优先报出（扫描前结束）。
